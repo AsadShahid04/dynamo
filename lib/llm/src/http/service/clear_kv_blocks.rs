@@ -172,27 +172,14 @@ async fn clear_kv_blocks_handler(
             }
         };
 
-        if discovery_instances.is_empty() {
-            add_worker_result(
-                false,
-                entry_name,
-                "No instances found for clear_kv_blocks endpoint",
-                namespace,
-                component,
-                None,
-            );
-            continue;
-        }
-
-        let instances_filtered: Vec<dynamo_runtime::component::Instance> = discovery_instances
+        let mut instances_found = false;
+        for instance in discovery_instances
             .into_iter()
             .filter_map(|di| match di {
                 dynamo_runtime::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
                 _ => None,
-            })
-            .collect();
-
-        for instance in &instances_filtered {
+            }) {
+            instances_found = true;
             let instance_name = format!("{}-instance-{}", entry.name, instance.id());
             match router.direct(().into(), instance.id()).await {
                 Ok(mut stream) => match stream.next().await {
@@ -228,6 +215,17 @@ async fn clear_kv_blocks_handler(
                     );
                 }
             }
+        }
+
+        if !instances_found {
+            add_worker_result(
+                false,
+                entry_name,
+                "No instances found for clear_kv_blocks endpoint",
+                namespace,
+                component,
+                None,
+            );
         }
     }
 
