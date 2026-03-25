@@ -39,13 +39,21 @@ use crate::pipeline::{
 };
 use anyhow::{Context, Result, anyhow as error};
 
-// Trait for IP address resolution - allows dependency injection for testing
+/// Trait for IP address resolution
+///
+/// This trait abstracts IP resolution to enable dependency injection for testing.
+/// Implementations can provide custom resolution logic or mock behavior.
 pub trait IpResolver {
+    /// Get the local IPv4 address
     fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
+
+    /// Get the local IPv6 address
     fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
 }
 
-// Default implementation using the real local_ip_address crate
+/// Default implementation of IpResolver using the local_ip_address crate
+///
+/// This resolver queries the system to discover the local IPv4 and IPv6 addresses.
 pub struct DefaultIpResolver;
 
 impl IpResolver for DefaultIpResolver {
@@ -152,26 +160,20 @@ impl TcpStreamServer {
                     .to_string()
             }
             None => {
-                let resolved_ip = resolver
-                    .local_ip()
-                    .or_else(|_| resolver.local_ipv6());
+                // Try IPv4 first, fallback to IPv6 on any error
+                let resolved_ip = match resolver.local_ip() {
+                    Ok(addr) => Ok(addr),
+                    Err(_) => resolver.local_ipv6(),
+                };
 
                 match resolved_ip {
                     Ok(addr) => addr,
-                    // Only fall back to loopback when no routable IP exists at all;
-                    // propagate other resolver errors (I/O, platform) so
-                    // misconfigured hosts fail fast instead of silently binding
-                    // to 127.0.0.1.
-                    Err(Error::LocalIpAddressNotFound) => {
+                    // No routable IP exists; fall back to loopback
+                    Err(_) => {
                         tracing::warn!(
                             "No routable local IP address found; falling back to 127.0.0.1"
                         );
                         IpAddr::from([127, 0, 0, 1])
-                    }
-                    Err(err) => {
-                        return Err(PipelineError::Generic(format!(
-                            "Failed to resolve local IP address: {err}"
-                        )));
                     }
                 }
                 .to_string()

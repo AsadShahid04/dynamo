@@ -7,18 +7,44 @@ use crate::pipeline::network::tcp::server::{DefaultIpResolver, IpResolver};
 use local_ip_address::Error;
 use std::net::IpAddr;
 
+/// Resolve local IP address with IPv4→IPv6 fallback
+///
+/// This function attempts to resolve the local IP address, preferring IPv4 but falling back
+/// to IPv6 if IPv4 resolution fails (for any reason, including StrategyError in IPv6-only
+/// environments). If both fail, returns the loopback address.
+///
+/// # Arguments
+/// * `resolver` - An implementation of IpResolver trait
+///
+/// # Returns
+/// The resolved IP address (IPv4, IPv6, or loopback)
 fn resolve_local_ip_with_resolver<R: IpResolver>(resolver: R) -> IpAddr {
-    let resolved_ip = resolver
-        .local_ip()
-        .or_else(|_| resolver.local_ipv6());
+    // Try IPv4 first, fallback to IPv6 on any error
+    let resolved_ip = match resolver.local_ip() {
+        Ok(addr) => Ok(addr),
+        Err(_) => resolver.local_ipv6(),
+    };
 
     match resolved_ip {
         Ok(addr) => addr,
-        Err(Error::LocalIpAddressNotFound) => IpAddr::from([127, 0, 0, 1]),
-        Err(_) => IpAddr::from([127, 0, 0, 1]), // Fallback for any other error
+        Err(_) => {
+            // Both IPv4 and IPv6 failed, fall back to loopback
+            IpAddr::from([127, 0, 0, 1])
+        }
     }
 }
 
+/// Format IP address for safe URL construction
+///
+/// IPv6 addresses must be wrapped in brackets when used in URLs to disambiguate
+/// the colons in the address from the port separator. IPv4 addresses are returned
+/// as-is since they don't have embedded colons.
+///
+/// # Arguments
+/// * `addr` - The IP address to format
+///
+/// # Returns
+/// Formatted string: IPv6 wrapped in brackets (e.g., "[::1]"), IPv4 as-is (e.g., "127.0.0.1")
 fn format_ip_for_url(addr: IpAddr) -> String {
     // Wrap IPv6 addresses with brackets for safe URL construction
     // e.g., "2001:db8::1" becomes "[2001:db8::1]" so that "{host}:{port}" is valid
