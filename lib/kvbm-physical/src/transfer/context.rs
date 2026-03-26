@@ -129,17 +129,7 @@ impl TransferConfigBuilder {
         let nixl_agent =
             NixlAgent::from_nixl_backend_config(&agent_name, config.nixl_backend_config)?;
 
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
-        let context = TransferContext::new(
-            nixl_agent,
-            config.event_system,
-            cuda_context,
-            config.tokio_runtime,
-            config.capabilities,
-            config.cuda_pool_reserve_size,
-            config.cuda_pool_release_threshold,
-        )?;
-        Ok(TransferManager::from_context(context))
+        build_manager_from_config(config.event_system, config.cuda_device_id, config.tokio_runtime, config.capabilities, config.cuda_pool_reserve_size, config.cuda_pool_release_threshold, nixl_agent)
     }
 }
 
@@ -156,23 +146,39 @@ impl TransferConfigBuilderWithAgent {
     /// Build the TransferManager using the pre-configured agent.
     pub fn build(self) -> Result<TransferManager> {
         let config = self.builder.build_internal()?;
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
-        let context = TransferContext::new(
-            self.agent,
-            config.event_system,
-            cuda_context,
-            config.tokio_runtime,
-            config.capabilities,
-            config.cuda_pool_reserve_size,
-            config.cuda_pool_release_threshold,
-        )?;
-        Ok(TransferManager::from_context(context))
+        build_manager_from_config(config.event_system, config.cuda_device_id, config.tokio_runtime, config.capabilities, config.cuda_pool_reserve_size, config.cuda_pool_release_threshold, self.agent)
     }
 
     pub fn cuda_device_id(mut self, cuda_device_id: usize) -> Self {
         self.builder = self.builder.cuda_device_id(cuda_device_id);
         self
     }
+}
+
+/// Shared helper: create a `CudaContext`, build the `TransferContext`, and wrap it in a
+/// `TransferManager`. Both `TransferConfigBuilder::build` and
+/// `TransferConfigBuilderWithAgent::build` delegate here to avoid duplicating the CUDA
+/// pool initialisation logic.
+fn build_manager_from_config(
+    event_system: Arc<EventManager>,
+    cuda_device_id: usize,
+    tokio_runtime: TokioRuntime,
+    capabilities: TransferCapabilities,
+    cuda_pool_reserve_size: usize,
+    cuda_pool_release_threshold: Option<u64>,
+    nixl_agent: NixlAgent,
+) -> Result<TransferManager> {
+    let cuda_context = CudaContext::new(cuda_device_id)?;
+    let context = TransferContext::new(
+        nixl_agent,
+        event_system,
+        cuda_context,
+        tokio_runtime,
+        capabilities,
+        cuda_pool_reserve_size,
+        cuda_pool_release_threshold,
+    )?;
+    Ok(TransferManager::from_context(context))
 }
 
 fn get_tokio_runtime() -> TokioRuntime {
