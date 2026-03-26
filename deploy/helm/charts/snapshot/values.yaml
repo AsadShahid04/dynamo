@@ -95,6 +95,20 @@ daemonset:
   # Affinity rules
   affinity: {}
 
+  # Extra environment variables to inject into the snapshot-agent container.
+  # These are appended after the chart-managed env vars so they can be used to
+  # override defaults or supply additional configuration.
+  # Example:
+  #   extraEnv:
+  #     - name: MY_VAR
+  #       value: "my-value"
+  #     - name: SECRET_VAR
+  #       valueFrom:
+  #         secretKeyRef:
+  #           name: my-secret
+  #           key: my-key
+  extraEnv: []
+
 # Seccomp profile configuration
 seccomp:
   # Deploy seccomp profile for blocking io_uring (required for CRIU)

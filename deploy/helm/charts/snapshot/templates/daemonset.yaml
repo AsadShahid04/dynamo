@@ -97,6 +97,9 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- end }}
+            {{- with .Values.daemonset.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             # Mount configuration ConfigMap
             - name: config

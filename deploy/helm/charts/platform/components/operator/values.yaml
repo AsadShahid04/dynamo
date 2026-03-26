@@ -24,6 +24,14 @@ upgradeCRD: true
 # Environment variables to pass to operator Deployment.
 env: []
 
+# Extra environment variables to inject into the operator container.
+# These are appended after the chart-managed env vars.
+# Example:
+#   extraEnv:
+#     - name: MY_VAR
+#       value: "my-value"
+extraEnv: []
+
 # Namespace restriction configuration for the operator
 # If enabled: true and targetNamespace is empty, the operator will be restricted to the release namespace
 # If enabled: true and targetNamespace is set, the operator will be restricted to the specified namespace
