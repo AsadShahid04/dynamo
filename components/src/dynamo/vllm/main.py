@@ -17,7 +17,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
-from dynamo.common.config_dump import dump_config
+from dynamo.common.config_dump import dump_config, validate_cuda_compute_capability
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -112,6 +112,7 @@ def run_dynamo_headless(config: Config) -> None:
 async def worker() -> None:
     config = parse_args()
 
+    validate_cuda_compute_capability()
     dump_config(config.dump_config_to, config)
 
     # Name the model. Use either the full path (vllm and sglang do the same),

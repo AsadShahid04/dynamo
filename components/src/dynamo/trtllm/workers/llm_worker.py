@@ -31,7 +31,7 @@ from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
-from dynamo.common.config_dump import dump_config
+from dynamo.common.config_dump import dump_config, validate_cuda_compute_capability
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -320,6 +320,8 @@ async def init_llm_worker(
     else:
         # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
         default_sampling_params.detokenize = False
+
+    validate_cuda_compute_capability()
 
     connector = None
     logging.info("Initializing NIXL Connect.")

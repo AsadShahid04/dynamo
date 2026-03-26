@@ -5,7 +5,7 @@ import importlib.metadata
 import logging
 import platform
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,58 @@ def get_gpu_info() -> Optional[Dict[str, Any]]:
         logger.debug(f"Failed to get GPU info: {e}")
 
     return None
+
+
+# Minimum CUDA compute capability required for full Dynamo feature support.
+# Ampere (sm_80) introduced async copy, fine-grained sparse maths, and the
+# memory pool APIs that Dynamo relies on.  Older architectures (Volta, Turing)
+# may still work for basic inference but are not officially supported.
+MINIMUM_COMPUTE_CAPABILITY: Tuple[int, int] = (8, 0)
+
+
+def validate_cuda_compute_capability(
+    minimum: Tuple[int, int] = MINIMUM_COMPUTE_CAPABILITY,
+) -> None:
+    """Log a warning for each GPU whose compute capability is below *minimum*.
+
+    This is a best-effort helper; all exceptions are caught so that it never
+    prevents a worker from starting.
+
+    Args:
+        minimum: (major, minor) compute capability floor. Defaults to
+            ``MINIMUM_COMPUTE_CAPABILITY`` (Ampere, sm_80).
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+
+        device_count = torch.cuda.device_count()
+        for device_idx in range(device_count):
+            try:
+                cap = torch.cuda.get_device_capability(device_idx)
+                if cap < minimum:
+                    device_name = torch.cuda.get_device_name(device_idx)
+                    logger.warning(
+                        "GPU %d (%s) has compute capability %d.%d which is below "
+                        "the minimum supported capability %d.%d. "
+                        "Some Dynamo features may not work correctly.",
+                        device_idx,
+                        device_name,
+                        cap[0],
+                        cap[1],
+                        minimum[0],
+                        minimum[1],
+                    )
+            except Exception as inner_exc:
+                logger.debug(
+                    "Could not query compute capability for device %d: %s",
+                    device_idx,
+                    inner_exc,
+                )
+    except Exception as exc:
+        logger.debug("validate_cuda_compute_capability skipped: %s", exc)
 
 
 def get_package_info() -> Optional[Dict[str, Any]]:

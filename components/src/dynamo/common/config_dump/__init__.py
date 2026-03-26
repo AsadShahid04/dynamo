@@ -19,6 +19,7 @@ from dynamo.common.config_dump.system_info import (
     get_gpu_info,
     get_runtime_info,
     get_system_info,
+    validate_cuda_compute_capability,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "get_runtime_info",
     "get_system_info",
     "register_encoder",
+    "validate_cuda_compute_capability",
 ]
