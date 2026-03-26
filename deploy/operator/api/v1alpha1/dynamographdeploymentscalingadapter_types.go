@@ -53,8 +53,10 @@ type DynamoGraphDeploymentServiceRef struct {
 type DynamoGraphDeploymentScalingAdapterStatus struct {
 	// Replicas is the current number of replicas for the target service.
 	// This is synced from the DGD's service replicas and is required for the scale subresource.
-	// +optional
-	Replicas int32 `json:"replicas,omitempty"`
+	// NOTE: must NOT use omitempty — the HPA scale subresource reads this field and needs to
+	// observe 0 when the service has been scaled to zero. Omitting the field (Go zero value)
+	// would cause the HPA to misinterpret the current state.
+	Replicas int32 `json:"replicas"`
 
 	// Selector is a label selector string for the pods managed by this adapter.
 	// Required for HPA compatibility via the scale subresource.
