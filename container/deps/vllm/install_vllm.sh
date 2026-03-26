@@ -37,6 +37,8 @@ while [[ $# -gt 0 ]]; do
             ;;
         --vllm-ref)
             VLLM_REF="$2"
+            # Derive VLLM_VER from VLLM_REF by stripping the leading 'v' (if present)
+            VLLM_VER="${VLLM_REF#v}"
             shift 2
             ;;
         --max-jobs)
