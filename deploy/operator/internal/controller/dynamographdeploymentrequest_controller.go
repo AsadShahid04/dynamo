@@ -1653,12 +1653,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 
 	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
 
-	// Ensure scalingAdapter is present in generated DGD if needed
-	if r.shouldEnableScalingAdapter(dgd) && dgd.Spec.ScalingAdapter == nil {
-		dgd.Spec.ScalingAdapter = &dgdv1alpha1.ScalingAdapter{
-			Enabled: true,
+	// Ensure scalingAdapter is enabled in generated DGD if needed
+	if r.shouldEnableScalingAdapter(dgd) {
+		if dgd.Spec.ScalingAdapter == nil {
+			dgd.Spec.ScalingAdapter = &dgdv1alpha1.ScalingAdapter{
+				Enabled: true,
+			}
+			logger.Info("Added scalingAdapter to generated DGD for autoscaling support")
+		} else if !dgd.Spec.ScalingAdapter.Enabled {
+			dgd.Spec.ScalingAdapter.Enabled = true
+			logger.Info("Enabled scalingAdapter on generated DGD for autoscaling support")
 		}
-		logger.Info("Added scalingAdapter to generated DGD for autoscaling support")
 	}
 
 	if len(additionalResources) > 0 {
@@ -2035,8 +2040,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
 }
 
-// shouldEnableScalingAdapter returns true if the DGD should have scaling adapter enabled
-// (i.e., if any of its services use planners for autoscaling)
+// shouldEnableScalingAdapter returns true if the DynamoGraphDeployment should have
+// scaling adapter enabled based on the presence of planner components.
+// Specifically, it checks if any component has a non-nil Planner, which indicates
+// that autoscaling support is needed for that service.
 func (r *DynamoGraphDeploymentRequestReconciler) shouldEnableScalingAdapter(dgd *dgdv1alpha1.DynamoGraphDeployment) bool {
 	if dgd == nil || dgd.Spec.Components == nil {
 		return false
