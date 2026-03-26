@@ -5,7 +5,7 @@ title: Support Matrix
 subtitle: Hardware, software, and build compatibility for Dynamo
 ---
 
-**See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
+**See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support | [Version Compatibility](version-compatibility.md) for Python, Kubernetes, and upgrade-path compatibility
 
 ## At a Glance
 
