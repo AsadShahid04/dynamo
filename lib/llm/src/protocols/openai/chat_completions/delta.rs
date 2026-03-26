@@ -265,12 +265,15 @@ impl DeltaGenerator {
             reasoning_content: None,
         };
 
+        let has_reasoning = delta.reasoning_content.as_ref().is_some_and(|r| !r.is_empty());
+
         let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
             stop_reason,
             logprobs,
+            has_reasoning: if has_reasoning { Some(true) } else { None },
         };
 
         let choices = vec![choice];
