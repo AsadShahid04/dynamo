@@ -80,7 +80,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: String,
+    local_ip: IpAddr,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
@@ -138,18 +138,18 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
+        let local_ip: IpAddr = match options.interface {
             Some(interface) => {
                 let interfaces: HashMap<String, std::net::IpAddr> =
                     list_afinet_netifas()?.into_iter().collect();
 
                 interfaces
                     .get(&interface)
+                    .copied()
                     .ok_or(PipelineError::Generic(format!(
                         "Interface not found: {}",
                         interface
                     )))?
-                    .to_string()
             }
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
@@ -175,13 +175,12 @@ impl TcpStreamServer {
                         )));
                     }
                 }
-                .to_string()
             }
         };
 
         let state = Arc::new(Mutex::new(State::default()));
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone())
+        let local_port = Self::start(local_ip, options.port, state.clone())
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
@@ -197,8 +196,8 @@ impl TcpStreamServer {
     }
 
     #[allow(clippy::await_holding_lock)]
-    async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+    async fn start(local_ip: IpAddr, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
+        let addr = std::net::SocketAddr::new(local_ip, local_port).to_string();
         let state_clone = state.clone();
         let mut guard = state.lock().await;
         if guard.handle.is_some() {
@@ -239,7 +238,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = std::net::SocketAddr::new(self.local_ip, self.local_port).to_string();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -683,7 +682,7 @@ mod tests {
         }
 
         fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-            Ok(IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]))
+            Ok(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
         }
     }
 
@@ -836,8 +835,8 @@ mod tests {
             "Should use IPv6 address when IPv4 is unavailable"
         );
 
-        // Verify it matches our test IPv6 address
-        let expected_ipv6 = IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]);
+        // Verify it matches our test IPv6 address (::1 loopback, always available)
+        let expected_ipv6 = IpAddr::V6(std::net::Ipv6Addr::LOCALHOST);
         assert_eq!(
             ip, expected_ipv6,
             "Should use the IPv6 address from resolver, got: {}",
