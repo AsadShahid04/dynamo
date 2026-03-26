@@ -1,3 +1,9 @@
+//! Reset Prefix Cache Endpoint
+//!
+//! This module provides HTTP endpoint functionality for resetting prefix caches across
+//! distributed worker groups. The endpoint allows clearing cached key-value pairs to ensure
+//! fresh computation for subsequent requests.
+
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,8 +14,22 @@ use std::sync::Arc;
 
 use dynamo_runtime::{discovery::DiscoveryQuery, pipeline::PushRouter, stream::StreamExt};
 
+/// Endpoint path constant for the reset_prefix_cache operation
 pub const RESET_PREFIX_CACHE_ENDPOINT: &str = "reset_prefix_cache";
 
+/// Create the reset_prefix_cache HTTP router
+///
+/// This function creates an Axum router that handles POST requests to reset prefix caches
+/// across all active worker groups in the Dynamo cluster.
+///
+/// # Arguments
+/// * `state` - The shared HTTP service state containing model manager and runtime
+/// * `path` - Optional custom path for the endpoint (defaults to "/reset_prefix_cache")
+///
+/// # Returns
+/// A tuple containing:
+/// * `Vec<RouteDoc>` - Documentation for the route (method and path)
+/// * `Router` - The Axum router configured with the reset_prefix_cache handler
 pub fn reset_prefix_cache_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
@@ -25,6 +45,23 @@ pub fn reset_prefix_cache_router(
     (docs, router)
 }
 
+/// Handle POST requests to reset prefix caches
+///
+/// This handler processes requests to clear prefix caches on all active worker instances.
+/// It iterates through each worker group, discovers instances with the reset_prefix_cache endpoint,
+/// and sends reset requests to each instance.
+///
+/// The response includes lists of successfully cleared workers and workers that failed.
+/// If no active worker groups are found or the runtime cannot be created, an appropriate
+/// error message is returned in the JSON response.
+///
+/// # Arguments
+/// * `state` - The HTTP service state with model manager and runtime
+///
+/// # Returns
+/// A JSON response containing:
+/// * `cleared_workers` - Array of successfully reset worker instances with their responses
+/// * `failed_workers` - Array of workers that failed with error messages
 async fn reset_prefix_cache_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
@@ -49,13 +86,30 @@ async fn reset_prefix_cache_handler(
     let mut cleared_workers = Vec::new();
     let mut failed_workers = Vec::new();
 
-    // update cleared and failed workers
-    let mut add_worker_result = |success: bool,
-                                 name: String,
-                                 status: &str,
-                                 ns: &str,
-                                 comp: &str,
-                                 message: Option<String>| {
+    /// Helper function to categorize and format worker result
+    ///
+    /// This function creates a JSON entry for a worker's operation result and adds it
+    /// to either the success or failure list based on the outcome.
+    ///
+    /// # Arguments
+    /// * `success` - Whether the operation succeeded
+    /// * `name` - The worker instance name
+    /// * `status` - Human-readable status message
+    /// * `ns` - Kubernetes namespace of the worker
+    /// * `comp` - Component name in the namespace
+    /// * `message` - Optional message (response on success, error details on failure)
+    /// * `cleared` - Mutable vector to append successful results to
+    /// * `failed` - Mutable vector to append failed results to
+    fn add_worker_result(
+        success: bool,
+        name: String,
+        status: &str,
+        ns: &str,
+        comp: &str,
+        message: Option<String>,
+        cleared: &mut Vec<serde_json::Value>,
+        failed: &mut Vec<serde_json::Value>,
+    ) {
         let mut result = json!({
             "name": name,
             "endpoint": format!("{}/{}/{}", ns, comp, RESET_PREFIX_CACHE_ENDPOINT),
@@ -65,14 +119,14 @@ async fn reset_prefix_cache_handler(
             if let Some(m) = message {
                 result["response"] = json!(m);
             }
-            cleared_workers.push(result);
+            cleared.push(result);
         } else {
             if let Some(m) = message {
                 result["error"] = json!(m);
             }
-            failed_workers.push(result);
+            failed.push(result);
         }
-    };
+    }
 
     // create client for each model entry
     for entry in &model_entries {
@@ -92,6 +146,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -107,6 +163,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -125,6 +183,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -145,6 +205,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -167,6 +229,8 @@ async fn reset_prefix_cache_handler(
                     namespace,
                     component,
                     Some(e.to_string()),
+                    &mut cleared_workers,
+                    &mut failed_workers,
                 );
                 continue;
             }
@@ -180,6 +244,8 @@ async fn reset_prefix_cache_handler(
                 namespace,
                 component,
                 None,
+                &mut cleared_workers,
+                &mut failed_workers,
             );
             continue;
         }
@@ -204,6 +270,8 @@ async fn reset_prefix_cache_handler(
                             namespace,
                             component,
                             Some(response.to_string()),
+                            &mut cleared_workers,
+                            &mut failed_workers,
                         );
                     }
                     None => {
@@ -214,6 +282,8 @@ async fn reset_prefix_cache_handler(
                             namespace,
                             component,
                             None,
+                            &mut cleared_workers,
+                            &mut failed_workers,
                         );
                     }
                 },
@@ -225,6 +295,8 @@ async fn reset_prefix_cache_handler(
                         namespace,
                         component,
                         Some(e.to_string()),
+                        &mut cleared_workers,
+                        &mut failed_workers,
                     );
                 }
             }
