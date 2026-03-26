@@ -239,7 +239,13 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        // Format address properly for both IPv4 and IPv6
+        // IPv6 addresses must be wrapped in brackets when used with a port
+        let address = if self.local_ip.contains(':') {
+            format!("[{}]:{}", self.local_ip, self.local_port)
+        } else {
+            format!("{}:{}", self.local_ip, self.local_port)
+        };
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -661,7 +667,10 @@ mod tests {
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
 
-    // Mock resolver that always fails to simulate the fallback scenario
+    /// Test resolver that simulates complete IP detection failure
+    ///
+    /// This resolver always returns LocalIpAddressNotFound for both IPv4 and IPv6
+    /// lookups. Used to test fallback to loopback address when no routable IP is found.
     struct FailingIpResolver;
 
     impl IpResolver for FailingIpResolver {
@@ -674,7 +683,11 @@ mod tests {
         }
     }
 
-    // IPv6-only resolver: IPv4 unavailable, IPv6 available
+    /// Test resolver that simulates IPv6-only network environment
+    ///
+    /// This resolver returns LocalIpAddressNotFound for IPv4 lookups (simulating
+    /// IPv4 unavailability) but returns a valid IPv6 address for IPv6 lookups.
+    /// Used to test fallback behavior on IPv6-only networks.
     struct Ipv6OnlyResolver;
 
     impl IpResolver for Ipv6OnlyResolver {
@@ -687,10 +700,12 @@ mod tests {
         }
     }
 
+    /// Test that TcpStreamServer::new works with default options
+    ///
+    /// This verifies normal operation when IP detection succeeds. The server should
+    /// bind to an available local IP and assign a valid port number.
     #[tokio::test]
     async fn test_tcp_stream_server_default_behavior() {
-        // Test that TcpStreamServer::new works with default options
-        // This verifies normal operation when IP detection succeeds
         let options = ServerOptions::default();
         let result = TcpStreamServer::new(options).await;
 
@@ -735,11 +750,13 @@ mod tests {
         );
     }
 
+    /// Test fallback behavior when IP detection fails
+    ///
+    /// This test uses a mock resolver that always fails to simulate a scenario where
+    /// IP detection is unavailable. The server should fallback to 127.0.0.1 and still
+    /// successfully bind and operate.
     #[tokio::test]
     async fn test_tcp_stream_server_fallback_to_loopback() {
-        // Test fallback behavior using a mock resolver that always fails
-        // This guarantees the fallback logic is triggered
-
         let options = ServerOptions::builder().port(0).build().unwrap();
 
         // Use the failing resolver to force the fallback
@@ -792,12 +809,15 @@ mod tests {
         assert!(socket_addr.port() > 0, "Server should have a valid port");
     }
 
+    /// Test IPv6-only network support with proper IPv4→IPv6 fallback
+    ///
+    /// This test validates that TcpStreamServer correctly handles IPv6-only environments
+    /// where IPv4 is unavailable. The server should fall back to IPv6 and bind to the
+    /// IPv6 address returned by the resolver.
+    ///
+    /// This test addresses issue #7619: Dynamo should work on IPv6-only networks.
     #[tokio::test]
     async fn test_tcp_stream_server_ipv6_only_network() {
-        // Test IPv6-only network support: IPv4 unavailable, IPv6 available
-        // This validates that the server properly falls back to IPv6 when IPv4 is not found
-        // Fixes issue #7619: Dynamo should work on IPv6-only networks
-
         let options = ServerOptions::builder().port(0).build().unwrap();
 
         // Use the IPv6-only resolver to simulate an IPv6-only environment
