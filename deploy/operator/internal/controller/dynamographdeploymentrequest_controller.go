@@ -1653,6 +1653,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 
 	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
 
+	// Ensure scalingAdapter is present in generated DGD if needed
+	if r.shouldEnableScalingAdapter(dgd) && dgd.Spec.ScalingAdapter == nil {
+		dgd.Spec.ScalingAdapter = &dgdv1alpha1.ScalingAdapter{
+			Enabled: true,
+		}
+		logger.Info("Added scalingAdapter to generated DGD for autoscaling support")
+	}
+
 	if len(additionalResources) > 0 {
 		if err := r.storeAdditionalResources(ctx, dgdr, additionalResources); err != nil {
 			logger.Error(err, "Failed to store additional resources")
@@ -2025,4 +2033,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 		// Set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
+}
+
+// shouldEnableScalingAdapter returns true if the DGD should have scaling adapter enabled
+// (i.e., if any of its services use planners for autoscaling)
+func (r *DynamoGraphDeploymentRequestReconciler) shouldEnableScalingAdapter(dgd *dgdv1alpha1.DynamoGraphDeployment) bool {
+	if dgd == nil || dgd.Spec.Components == nil {
+		return false
+	}
+
+	for _, component := range dgd.Spec.Components {
+		if component.Planner != nil {
+			return true
+		}
+	}
+	return false
 }
