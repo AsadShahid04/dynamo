@@ -22,6 +22,7 @@ from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
 
 DEFAULT_ENDPOINT_COMPONENT = "tensorrt_llm"
 DEFAULT_PREFILL_COMPONENT = "prefill"
+DEFAULT_DECODE_COMPONENT = "decode"
 DEFAULT_ENCODE_COMPONENT = "tensorrt_llm_encode"
 DEFAULT_DIFFUSION_COMPONENT = "diffusion"
 DEFAULT_ENDPOINT_NAME = "generate"
@@ -149,6 +150,8 @@ def _default_endpoint(
         component_name = DEFAULT_ENCODE_COMPONENT
     elif disaggregation_mode == DisaggregationMode.PREFILL:
         component_name = DEFAULT_PREFILL_COMPONENT
+    elif disaggregation_mode == DisaggregationMode.DECODE:
+        component_name = DEFAULT_DECODE_COMPONENT
     else:
         component_name = DEFAULT_ENDPOINT_COMPONENT
     return f"dyn://{namespace}.{component_name}.{DEFAULT_ENDPOINT_NAME}"
