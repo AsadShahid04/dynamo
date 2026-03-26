@@ -177,7 +177,6 @@ async def init_llm_worker(
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
         "max_num_tokens": config.max_num_tokens,
-        "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
         "return_perf_metrics": config.publish_events_and_metrics,
@@ -187,6 +186,11 @@ async def init_llm_worker(
         "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
+
+    # Only set max_seq_len when explicitly configured; otherwise let TRT-LLM
+    # deduce the value from the model config (BuildConfig default is None).
+    if config.max_seq_len is not None:
+        arg_map["max_seq_len"] = config.max_seq_len
 
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:

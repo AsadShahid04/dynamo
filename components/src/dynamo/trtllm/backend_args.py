@@ -455,7 +455,7 @@ class DynamoTrtllmConfig(ConfigBase):
     gpus_per_node: Optional[int] = None
     max_batch_size: int
     max_num_tokens: int
-    max_seq_len: int
+    max_seq_len: Optional[int] = None
     max_beam_width: int
     free_gpu_memory_fraction: float
     extra_engine_args: str
