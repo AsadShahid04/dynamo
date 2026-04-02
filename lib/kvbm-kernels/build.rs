@@ -316,6 +316,7 @@ fn get_cuda_arch_flags() -> Vec<String> {
     let arch_list = explicit_archs.as_deref().unwrap_or("80,86,89,90,100,120");
 
     let mut compiled_archs = Vec::new();
+    let mut skipped_archs = Vec::new();
 
     for arch in arch_list.split(',') {
         let arch = arch.trim();
@@ -332,20 +333,35 @@ fn get_cuda_arch_flags() -> Vec<String> {
         if let Some(max) = max_compute
             && arch_num > max
         {
-            println!(
-                "cargo:warning=Skipping sm_{} (unsupported by detected CUDA toolkit, max: sm_{})",
-                arch_num, max
-            );
+            skipped_archs.push(arch_num);
             continue;
         }
         compiled_archs.push(arch_num);
         flags.push(format!("-gencode=arch=compute_{},code=sm_{}", arch, arch));
     }
 
-    if !compiled_archs.is_empty() {
+    if compiled_archs.is_empty() {
+        println!(
+            "cargo:warning=No GPU architectures compiled. All requested architectures exceed the \
+             maximum supported by the detected CUDA toolkit (max: sm_{}).",
+            max_compute.unwrap_or(0)
+        );
+    } else {
         println!(
             "cargo:warning=Building kernels for GPU architectures: sm_{}",
             compiled_archs
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", sm_")
+        );
+    }
+
+    if !skipped_archs.is_empty() {
+        println!(
+            "cargo:warning=Skipped GPU architectures (unsupported by detected CUDA toolkit, max: sm_{}): sm_{}",
+            max_compute.unwrap_or(0),
+            skipped_archs
                 .iter()
                 .map(|a| a.to_string())
                 .collect::<Vec<_>>()
