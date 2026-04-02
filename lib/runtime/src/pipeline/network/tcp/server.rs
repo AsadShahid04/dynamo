@@ -696,7 +696,7 @@ mod tests {
         }
 
         fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-            Ok(IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]))
+            Ok(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1])) // ::1 (IPv6 loopback)
         }
     }
 
@@ -736,7 +736,10 @@ mod tests {
             .clone();
 
         let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
-        let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
+        let socket_addr = tcp_info
+            .address
+            .parse::<std::net::SocketAddr>()
+            .expect("valid socket addr");
 
         // Should have a valid port assigned
         assert!(
@@ -786,7 +789,10 @@ mod tests {
             .clone();
 
         let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
-        let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
+        let socket_addr = tcp_info
+            .address
+            .parse::<std::net::SocketAddr>()
+            .expect("valid socket addr");
 
         // With the failing resolver, fallback should ALWAYS be used
         let ip = socket_addr.ip();
@@ -847,7 +853,10 @@ mod tests {
             .clone();
 
         let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
-        let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
+        let socket_addr = tcp_info
+            .address
+            .parse::<std::net::SocketAddr>()
+            .expect("valid socket addr");
 
         // Should use the IPv6 address from the resolver
         let ip = socket_addr.ip();
@@ -856,8 +865,8 @@ mod tests {
             "Should use IPv6 address when IPv4 is unavailable"
         );
 
-        // Verify it matches our test IPv6 address
-        let expected_ipv6 = IpAddr::from([0xfd00, 0xdead, 0xbeef, 0, 0, 0, 0, 1]);
+        // Verify it matches our test IPv6 address (::1, the IPv6 loopback)
+        let expected_ipv6 = IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]); // ::1
         assert_eq!(
             ip, expected_ipv6,
             "Should use the IPv6 address from resolver, got: {}",
@@ -870,6 +879,38 @@ mod tests {
         println!(
             "SUCCESS: IPv6-only network support confirmed. Bound to: {}",
             ip
+        );
+    }
+
+    /// Test that a resolver StrategyError propagates as a hard failure
+    ///
+    /// When the resolver returns `Error::StrategyError` (not `LocalIpAddressNotFound`),
+    /// the server must NOT silently fall back to loopback — it must surface the error
+    /// so misconfigured hosts fail fast.
+    #[tokio::test]
+    async fn test_tcp_stream_server_strategy_error_propagates() {
+        struct StrategyErrorResolver;
+
+        impl IpResolver for StrategyErrorResolver {
+            fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
+                Err(Error::StrategyError(
+                    "simulated strategy failure".to_string(),
+                ))
+            }
+
+            fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
+                Err(Error::StrategyError(
+                    "simulated strategy failure".to_string(),
+                ))
+            }
+        }
+
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let result = TcpStreamServer::new_with_resolver(options, StrategyErrorResolver).await;
+
+        assert!(
+            result.is_err(),
+            "Server creation must fail when resolver returns StrategyError"
         );
     }
 }
