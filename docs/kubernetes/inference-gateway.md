@@ -137,7 +137,7 @@ Examples for other models can be found in the recipes folder.
 kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml  -n ${NAMESPACE}
 kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml  -n ${NAMESPACE}
 ```
-We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated serving.
+We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated, `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated single-node serving, and `recipes/llama-3-70b/vllm/disagg-multi-node/gaie/` for disaggregated multi-node serving (2 nodes, 16 GPUs total).
 Note for the aggregated serving you need to disable DYN_ENFORCE_DISAGG in epp config.
 ```bash
   - name: DYN_ENFORCE_DISAGG
@@ -153,9 +153,13 @@ kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
 # Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point where your gateway is.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
-# or disagg
+# or disagg (single-node)
 kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/deploy.yaml  -n ${NAMESPACE}
 kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yaml -n ${NAMESPACE}
+
+# or disagg (multi-node, 2 nodes × 8 GPUs)
+kubectl apply -f recipes/llama-3-70b/vllm/disagg-multi-node/gaie/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/llama-3-70b/vllm/disagg-multi-node/gaie/http-route.yaml -n ${NAMESPACE}
 ```
 
 - When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.

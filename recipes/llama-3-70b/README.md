@@ -9,6 +9,7 @@ Production-ready deployments for **Llama-3.3-70B-Instruct** using vLLM with FP8 
 | [**vllm/agg**](vllm/agg/) | 4x H100/H200 | Aggregated | Single-node, TP4 |
 | [**vllm/disagg-single-node**](vllm/disagg-single-node/) | 8x H100/H200 | Disaggregated | Prefill/decode separation on one node |
 | [**vllm/disagg-multi-node**](vllm/disagg-multi-node/) | 16x H100/H200 | Disaggregated | 2 nodes, 8 GPUs each |
+| [**vllm/disagg-multi-node/gaie**](vllm/disagg-multi-node/gaie/) | 16x H100/H200 | Disaggregated + GAIE | Multi-node with Gateway API Inference Extension |
 
 ## Prerequisites
 
@@ -64,4 +65,6 @@ curl http://localhost:8000/v1/chat/completions \
 
 - Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster before deploying
 - Model download takes approximately 15-30 minutes depending on network speed
-- For GAIE (Gateway API Inference Extension) integration, `kubectl apply` the files from the corresponding subfolder i.e. [vllm/agg/gaie/](vllm/agg/gaie/)
+- For GAIE (Gateway API Inference Extension) integration, `kubectl apply` the files from the corresponding subfolder:
+  - Aggregated: [vllm/agg/gaie/](vllm/agg/gaie/)
+  - Disaggregated multi-node: [vllm/disagg-multi-node/gaie/](vllm/disagg-multi-node/gaie/)
