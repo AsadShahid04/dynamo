@@ -2080,6 +2080,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 
 	logger.Info("Parsed profiling output", "profilerDGDName", dgd.Name, "additionalResources", len(additionalResources))
 
+	// When the profiler-generated deployment includes a planner, opt its worker
+	// components into the DynamoGraphDeploymentScalingAdapter so the planner can
+	// drive their replica counts via the Scale subresource. Without this,
+	// generated DGDs keep static replicas and planner-driven autoscaling silently
+	// has no effect.
+	if n := enablePlannerScalingAdapters(dgd); n > 0 {
+		logger.Info("Enabled scalingAdapter on worker components for planner autoscaling",
+			"dgdName", dgd.Name, "components", n)
+	}
+
 	if len(additionalResources) > 0 {
 		if err := storeAdditionalResources(dgdr, additionalResources); err != nil {
 			logger.Error(err, "Failed to store additional resources")
@@ -2141,6 +2151,54 @@ func applyDGDRRuntimeVersionOverride(
 		}
 	}
 	return changed
+}
+
+// plannerScaledComponentTypes are the worker component types a planner drives
+// via the DynamoGraphDeploymentScalingAdapter's Scale subresource. The frontend,
+// EPP, and the planner itself are not scaled by the planner and are left
+// untouched.
+var plannerScaledComponentTypes = map[nvidiacomv1beta1.ComponentType]bool{
+	nvidiacomv1beta1.ComponentTypeWorker:  true,
+	nvidiacomv1beta1.ComponentTypePrefill: true,
+	nvidiacomv1beta1.ComponentTypeDecode:  true,
+}
+
+// enablePlannerScalingAdapters opts worker components into the
+// DynamoGraphDeploymentScalingAdapter when the generated deployment contains a
+// planner component, so planner-driven autoscaling works by default. It returns
+// the number of components newly opted in.
+//
+// A component that already declares a scalingAdapter is left unchanged so any
+// explicit intent in the profiler-generated spec is preserved. When no planner
+// component is present the deployment is returned untouched.
+func enablePlannerScalingAdapters(dgd *nvidiacomv1beta1.DynamoGraphDeployment) int {
+	if dgd == nil {
+		return 0
+	}
+
+	hasPlanner := false
+	for i := range dgd.Spec.Components {
+		if dgd.Spec.Components[i].ComponentType == nvidiacomv1beta1.ComponentTypePlanner {
+			hasPlanner = true
+			break
+		}
+	}
+	if !hasPlanner {
+		return 0
+	}
+
+	enabled := 0
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !plannerScaledComponentTypes[component.ComponentType] {
+			continue
+		}
+		if component.ScalingAdapter == nil {
+			component.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+			enabled++
+		}
+	}
+	return enabled
 }
 
 // encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.
