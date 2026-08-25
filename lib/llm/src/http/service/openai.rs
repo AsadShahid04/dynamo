@@ -2591,6 +2591,19 @@ fn get_model_readiness(
     Ok(Json(model.namespace_readiness()).into_response())
 }
 
+/// Handler for POST /v1/responses/input_tokens.
+/// Returns an estimated input token count using a len/3 heuristic.
+async fn handler_responses_input_tokens(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Json(request): Json<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
+    let tokens = request.inner.estimate_tokens();
+    Ok(Json(dynamo_protocols::types::responses::ResponsesCountTokensResponse {
+        input_tokens: tokens,
+    })
+    .into_response())
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
@@ -2599,13 +2612,16 @@ pub fn responses_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
+    let input_tokens_path = format!("{}/input_tokens", &path);
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .route(&input_tokens_path, post(handler_responses_input_tokens))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc], router)
+    (vec![doc, input_tokens_doc], router)
 }
 
 async fn images(

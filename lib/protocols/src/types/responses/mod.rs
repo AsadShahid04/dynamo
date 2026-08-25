@@ -385,6 +385,154 @@ pub struct CreateResponse {
     pub truncation: Option<Truncation>,
 }
 
+// ---------------------------------------------------------------------------
+// Count tokens endpoint
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /v1/responses/input_tokens`.
+///
+/// Uses the same structure as `CreateResponse` since token counting
+/// needs to analyze the same input structure that would be sent to
+/// the full responses endpoint.
+pub type ResponsesCountTokensRequest = CreateResponse;
+
+/// Response body for `POST /v1/responses/input_tokens`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResponsesCountTokensResponse {
+    pub input_tokens: u32,
+}
+
+impl CreateResponse {
+    /// Estimate input token count using a `len/3` heuristic.
+    ///
+    /// This matches the approach used in the Anthropic count_tokens endpoint.
+    /// For production use, this should be replaced with actual tokenization
+    /// using the model's tokenizer, but the heuristic provides a reasonable
+    /// approximation for routing and client-side estimation.
+    pub fn estimate_tokens(&self) -> u32 {
+        let mut total_len: usize = 0;
+
+        // Count instructions
+        if let Some(instructions) = &self.instructions {
+            total_len += instructions.len();
+        }
+
+        // Count input content
+        total_len += estimate_input_param_len(&self.input);
+
+        // Count tools if present
+        if let Some(tools) = &self.tools {
+            for tool in tools {
+                total_len += estimate_tool_len(tool);
+            }
+        }
+
+        // Use len/3 heuristic (roughly 3 chars per token for English text)
+        ((total_len as f64) / 3.0).ceil() as u32
+    }
+}
+
+/// Estimate character length of an InputParam.
+fn estimate_input_param_len(input: &InputParam) -> usize {
+    match input {
+        InputParam::Text(text) => text.len(),
+        InputParam::Items(items) => items.iter().map(estimate_input_item_len).sum(),
+    }
+}
+
+/// Estimate character length of an InputItem.
+fn estimate_input_item_len(item: &InputItem) -> usize {
+    match item {
+        InputItem::ItemReference(_) => 50, // Rough estimate for reference
+        InputItem::Item(item) => estimate_item_len(item),
+        InputItem::EasyMessage(msg) => estimate_easy_message_len(msg),
+    }
+}
+
+/// Estimate character length of an Item.
+fn estimate_item_len(item: &Item) -> usize {
+    match item {
+        Item::Message(msg_item) => match msg_item {
+            MessageItem::Input(msg) => estimate_message_len(&msg.content),
+            MessageItem::Output(msg) => msg
+                .content
+                .iter()
+                .map(|c| match c {
+                    InputOutputMessageContent::OutputText(text) => text.text.len(),
+                    InputOutputMessageContent::Refusal(refusal) => refusal.refusal.len(),
+                })
+                .sum(),
+        },
+        Item::FunctionCall(fc) => fc.name.len() + fc.arguments.len(),
+        Item::FunctionCallOutput(fco) => {
+            // FunctionCallOutput is an enum: Text(String) or Content(Vec<InputContent>)
+            use async_openai::types::responses::FunctionCallOutput as FCO;
+            match &fco.output {
+                FCO::Text(s) => s.len(),
+                FCO::Content(content) => {
+                    // Estimate based on content items
+                    content.len() * 50 // Rough estimate per content item
+                }
+            }
+        }
+        Item::Reasoning(r) => {
+            // ReasoningItem has content field, not reasoning
+            r.content.as_ref().map(|c| c.len()).unwrap_or(0)
+        }
+        // Other item types: provide rough estimates
+        _ => 100, // Default estimate for other tool call types
+    }
+}
+
+/// Estimate character length of message content.
+fn estimate_message_len(content: &[InputContent]) -> usize {
+    content
+        .iter()
+        .map(|c| match c {
+            InputContent::InputText(text) => text.text.len(),
+            InputContent::InputImage(_) => 100, // Rough estimate for image token overhead
+            InputContent::InputFile(_) => 100,  // Rough estimate for file token overhead
+        })
+        .sum()
+}
+
+/// Estimate character length of an EasyInputMessage.
+fn estimate_easy_message_len(msg: &EasyInputMessage) -> usize {
+    match &msg.content {
+        EasyInputContent::Text(text) => text.len(),
+        EasyInputContent::ContentList(content) => estimate_message_len(content),
+    }
+}
+
+/// Estimate character length of a Tool definition.
+fn estimate_tool_len(tool: &Tool) -> usize {
+    match tool {
+        Tool::Function(func) => {
+            func.name.len()
+                + func.description.as_ref().map(|d| d.len()).unwrap_or(0)
+                + serde_json::to_string(&func.parameters)
+                    .map(|s| s.len())
+                    .unwrap_or(100)
+        }
+        Tool::FileSearch(_) => 50,
+        Tool::Computer(_) => 50,
+        Tool::ComputerUsePreview(_) => 50,
+        Tool::WebSearch(_) => 50,
+        Tool::WebSearch20250826(_) => 50,
+        Tool::WebSearchPreview(_) => 50,
+        Tool::WebSearchPreview20250311(_) => 50,
+        Tool::CodeInterpreter(_) => 50,
+        Tool::LocalShell => 50,
+        Tool::Shell(_) => 50,
+        Tool::ImageGeneration(_) => 50,
+        Tool::ApplyPatch => 50,
+        Tool::ToolSearch(_) => 50,
+        Tool::Mcp(_) => 50,
+        Tool::Namespace(_) => 50,
+        Tool::Custom(_) => 50,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,5 +924,47 @@ mod tests {
                 "turn {idx} did not route to EasyMessage: {item:?}",
             );
         }
+    }
+
+    #[test]
+    fn test_estimate_tokens_text_input() {
+        let req = CreateResponse {
+            input: InputParam::Text("Hello, world! This is a test message.".into()),
+            model: Some("test-model".into()),
+            ..Default::default()
+        };
+        let tokens = req.estimate_tokens();
+        // "Hello, world! This is a test message." is 39 chars, so ~13 tokens
+        assert!(tokens > 0);
+        assert!(tokens < 50); // Reasonable upper bound
+    }
+
+    #[test]
+    fn test_estimate_tokens_with_instructions() {
+        let req = CreateResponse {
+            input: InputParam::Text("Hello".into()),
+            instructions: Some("You are a helpful assistant.".into()),
+            model: Some("test-model".into()),
+            ..Default::default()
+        };
+        let tokens = req.estimate_tokens();
+        // Should count both input and instructions
+        assert!(tokens > 5); // More than just "Hello"
+    }
+
+    #[test]
+    fn test_estimate_tokens_structured_input() {
+        let req = CreateResponse {
+            input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
+                role: Role::User,
+                content: EasyInputContent::Text("What is 2+2?".into()),
+                ..Default::default()
+            })]),
+            model: Some("test-model".into()),
+            ..Default::default()
+        };
+        let tokens = req.estimate_tokens();
+        assert!(tokens > 0);
+        assert!(tokens < 20);
     }
 }
