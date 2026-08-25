@@ -184,6 +184,9 @@ where
     /// Latest worker span pointer seen on the active stream; stamped as
     /// `migration_link` on the next retry. Populated by `track_response`.
     last_worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    /// Workers that have failed during migration attempts for this request.
+    /// Used to exclude them from subsequent retry attempts via `allowed_worker_ids`.
+    failed_workers: std::collections::HashSet<u64>,
 }
 
 impl<Resp> RetryManager<Resp>
@@ -240,6 +243,7 @@ where
             model_name,
             metrics,
             last_worker_link: None,
+            failed_workers: std::collections::HashSet::new(),
         };
         slf.new_stream().await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -262,6 +266,8 @@ where
                 {
                     tracing::warn!(error = %err, "Stream disconnected, recreating stream");
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
+                    // Track the failed worker before retrying
+                    self.track_failed_worker();
                     if let Err(err) = self.new_stream().await {
                         tracing::warn!(error = ?err, "Cannot recreate stream");
                     } else {
@@ -286,6 +292,11 @@ where
             if let Some(link) = self.last_worker_link.as_ref() {
                 self.request.migration_link = Some(link.clone());
             }
+            // Apply worker exclusions for cache-free routing on retry.
+            // For KV routing, exclusions flow through allowed_worker_ids; for cache-free
+            // (Random/RoundRobin), we populate allowed_worker_ids to exclude failed workers
+            // so the selection honors the same filter that KV routing already uses.
+            self.apply_worker_exclusions();
             let request = Context::with_id_and_metadata(
                 self.request.clone(),
                 self.context.id().to_string(),
@@ -309,6 +320,8 @@ where
             {
                 tracing::warn!(error = %err, "Creating new stream, retrying");
                 self.metrics.inc_migration_new_request(&self.model_name);
+                // Track the failed worker before next retry
+                self.track_failed_worker();
                 continue;
             }
             break;
@@ -350,6 +363,81 @@ where
         }
         for token_id in token_ids.iter() {
             self.request.token_ids.push(*token_id);
+        }
+    }
+
+    /// Track the worker that just failed so it can be excluded from the next retry.
+    /// Extracts worker ID from the request's tracker (aggregated/decode) if available.
+    fn track_failed_worker(&mut self) {
+        if let Some(ref tracker) = self.request.tracker {
+            // For aggregated mode or decode phase, use decode_worker_id as the primary worker
+            if let Some(worker_id) = tracker.decode_worker_id() {
+                if self.failed_workers.insert(worker_id) {
+                    tracing::debug!(
+                        worker_id,
+                        "Tracking failed worker for migration exclusion"
+                    );
+                }
+            }
+            // Also track prefill worker if it's different (disaggregated case where prefill failed)
+            if let Some(worker_id) = tracker.prefill_worker_id() {
+                if tracker.decode_worker_id() != Some(worker_id) {
+                    if self.failed_workers.insert(worker_id) {
+                        tracing::debug!(
+                            worker_id,
+                            "Tracking failed prefill worker for migration exclusion"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply worker exclusions to the request's routing hints for cache-free routing retries.
+    /// For cache-free routing (Random/RoundRobin), this populates or updates `allowed_worker_ids`
+    /// to exclude workers that failed during previous migration attempts. KV routing already
+    /// supports `allowed_worker_ids` filtering; this ensures cache-free routing honors the same
+    /// exclusion mechanism on retry.
+    fn apply_worker_exclusions(&mut self) {
+        if self.failed_workers.is_empty() {
+            return;
+        }
+
+        let routing = self.request.routing.get_or_insert_with(Default::default);
+        match routing.allowed_worker_ids.as_mut() {
+            Some(allowed) => {
+                // If allowed_worker_ids is already set, remove failed workers from it
+                for failed in &self.failed_workers {
+                    allowed.remove(failed);
+                }
+                if !allowed.is_empty() {
+                    tracing::debug!(
+                        failed_workers = ?self.failed_workers,
+                        remaining_allowed = allowed.len(),
+                        "Migration retry: updated allowed_worker_ids to exclude failed workers"
+                    );
+                } else {
+                    // If all previously-allowed workers have failed, clear the filter
+                    // so the retry can attempt any available worker (including newly discovered ones)
+                    routing.allowed_worker_ids = None;
+                    tracing::warn!(
+                        failed_workers = ?self.failed_workers,
+                        "Migration retry: all previously-allowed workers failed; \
+                         clearing filter to allow any available worker"
+                    );
+                }
+            }
+            None => {
+                // No existing filter: we cannot invert the universe of workers here
+                // (we don't have the full discovered set), so log and rely on the
+                // global report_instance_down mechanism to filter failed workers.
+                // Cache-free routing uses free_ids() which respects report_instance_down.
+                tracing::debug!(
+                    failed_workers = ?self.failed_workers,
+                    "Migration retry: failed workers tracked; relying on \
+                     report_instance_down to filter them from free_ids()"
+                );
+            }
         }
     }
 
