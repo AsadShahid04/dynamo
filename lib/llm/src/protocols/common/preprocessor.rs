@@ -88,6 +88,13 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 
+    /// Worker IDs that must NOT handle this request.
+    /// Used by migration retries to exclude workers that have already failed.
+    /// Takes precedence: if a worker is in this set, it will be excluded even
+    /// if also present in `allowed_worker_ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_worker_ids: Option<HashSet<WorkerId>>,
+
     /// Request routing constraints used for worker compatibility and soft preference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_constraints: Option<RoutingConstraints>,

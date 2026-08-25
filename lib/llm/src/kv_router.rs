@@ -56,7 +56,7 @@ pub mod sticky;
 
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
-pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub use push_router::{CacheFreeRoutingRouter, DirectRoutingRouter, KvPushRouter};
 pub use scheduler_inputs::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 pub use sticky::{SessionLifecycleController, StickySessionRouter};
 

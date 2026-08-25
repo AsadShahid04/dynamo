@@ -415,3 +415,95 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         self.inner.direct(request, worker_id).await
     }
 }
+
+/// A cache-free routing wrapper that honors excluded_worker_ids for migration retries.
+///
+/// Wraps `PushRouter` for Random/RoundRobin modes and:
+/// - Filters out excluded workers during selection
+/// - Records selected worker ID in tracker (for migration exclusion tracking)
+/// - Dispatches directly to the selected worker
+pub struct CacheFreeRoutingRouter {
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    mode: RouterMode,
+}
+
+impl CacheFreeRoutingRouter {
+    pub fn new(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        mode: RouterMode,
+    ) -> Self {
+        CacheFreeRoutingRouter { inner, mode }
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for CacheFreeRoutingRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        use std::collections::HashSet;
+
+        // Extract excluded worker IDs from routing hints
+        let excluded_ids: Option<HashSet<u64>> = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.excluded_worker_ids.clone());
+
+        // Select a worker that's not in the excluded set. Try up to 20 times.
+        const MAX_SELECTION_ATTEMPTS: usize = 20;
+        let mut worker_id = None;
+
+        for attempt in 0..MAX_SELECTION_ATTEMPTS {
+            let candidate = self.inner.select_next_worker().ok_or_else(|| {
+                anyhow::anyhow!("No workers available for {} routing", self.mode)
+            })?;
+
+            // Check if this worker is excluded (e.g., failed in a previous migration retry)
+            if let Some(ref excluded) = excluded_ids {
+                if excluded.contains(&candidate) {
+                    tracing::debug!(
+                        worker_id = candidate,
+                        attempt = attempt + 1,
+                        "Skipping excluded worker, selecting another"
+                    );
+                    continue;
+                }
+            }
+
+            // Valid worker found
+            worker_id = Some(candidate);
+            break;
+        }
+
+        let worker_id = worker_id.ok_or_else(|| {
+            let excluded_count = excluded_ids.as_ref().map(|s| s.len()).unwrap_or(0);
+            anyhow::anyhow!(
+                "Could not find non-excluded worker for {} routing after {} attempts \
+                 ({} workers excluded)",
+                self.mode,
+                MAX_SELECTION_ATTEMPTS,
+                excluded_count
+            )
+        })?;
+
+        // Record the worker selection in the tracker so migration can track failures
+        if let Some(ref tracker) = request.tracker {
+            tracker.record_worker(
+                worker_id,
+                None,
+                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+            );
+            tracing::debug!(
+                worker_id,
+                router_mode = ?self.mode,
+                "Recorded cache-free routing selection for migration tracking"
+            );
+        }
+
+        // Dispatch directly to the selected worker
+        self.inner.direct(request, worker_id).await
+    }
+}

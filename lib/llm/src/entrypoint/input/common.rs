@@ -13,7 +13,8 @@ use crate::{
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
-        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+        CacheFreeRoutingRouter, DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter,
+        metrics::RouterRequestMetrics,
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -120,9 +121,13 @@ fn preprocessed_backend_engine(
 {
     let engine: ServiceEngine<_, _> = match router_mode {
         RouterMode::Direct => Arc::new(DirectRoutingRouter::new(router)),
-        RouterMode::Random
-        | RouterMode::RoundRobin
-        | RouterMode::PowerOfTwoChoices
+        RouterMode::Random | RouterMode::RoundRobin => {
+            // Wrap Random/RoundRobin with CacheFreeRoutingRouter to:
+            // 1. Record worker IDs in tracker for migration exclusion tracking
+            // 2. Honor excluded_worker_ids during selection
+            Arc::new(CacheFreeRoutingRouter::new(router, router_mode))
+        }
+        RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => Arc::new(router),
         RouterMode::KV => {
