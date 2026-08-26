@@ -1983,3 +1983,351 @@ def test_streaming_parallel_tool_calls_no_think(
     assert finish_reasons == [
         "tool_calls"
     ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
+
+
+@pytest.mark.vllm
+def test_streaming_tool_call_argument_deltas_flush_incrementally(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Regression: consecutive tool-call argument deltas should flush as separate frames.
+
+    Bug: with vllm chat processor, StreamingPostProcessor accumulates tool-call
+    deltas into in_progress_tool_calls but only flushes them when the parser
+    returns None or at finish_reason. Inside a long string argument the vLLM
+    streaming parser returns a delta on every token, so None never occurs and
+    the whole argument is withheld until the end of the turn.
+
+    This test simulates what the vLLM parser returns: a series of deltas with
+    tool_calls on consecutive chunks (no None between them), representing a
+    long string argument being generated token by token.
+
+    Expected: each parser delta should be emitted as a separate frame, not
+    accumulated into one giant frame at finish_reason.
+
+    See https://github.com/ai-dynamo/dynamo/issues/13821
+    """
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=None,
+        chat_template_kwargs={},
+    )
+
+    # Simulate vLLM streaming parser returning a delta on every token
+    # during a long string argument. Each CompletionOutput gets a tool_call
+    # delta from the parser (no None between them).
+    # The tool has: name="create_file", arguments={"path": "...", "content": "..."}
+    # where "content" is a long string being generated token by token.
+    outputs = [
+        # Function name arrives first
+        CompletionOutput(
+            index=0,
+            text='<tool_call>\n{"name": "create_file", ',
+            token_ids=[151657, 198, 4913, 606, 788, 330, 6644, 1889, 497],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        # Start of arguments - short "path" parameter
+        CompletionOutput(
+            index=0,
+            text='"arguments": {"path": "report.md", "content": "',
+            token_ids=[330, 16370, 788, 5212, 2341, 788, 330, 6796, 624, 1447, 497, 330, 2295, 788, 330],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        # Now many consecutive chunks with small argument fragments
+        # (simulating token-by-token generation of a long string)
+        CompletionOutput(
+            index=0,
+            text="# KV",
+            token_ids=[2, 17766],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" Caching",
+            token_ids=[61450],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" Report",
+            token_ids=[8304],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text="\\n\\n",
+            token_ids=[624, 624],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text="KV",
+            token_ids=[17766],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" caching",
+            token_ids=[61450],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" is",
+            token_ids=[374],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" a",
+            token_ids=[264],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" technique",
+            token_ids=[14054],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" used",
+            token_ids=[1202],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" in",
+            token_ids=[304],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" transformers",
+            token_ids=[32187],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" to",
+            token_ids=[311],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" avoid",
+            token_ids=[5534],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" recomputing",
+            token_ids=[75938],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" keys",
+            token_ids=[6418],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" and",
+            token_ids=[323],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text=" values.",
+            token_ids=[2872, 13],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        # Close the tool call
+        CompletionOutput(
+            index=0,
+            text='"}}\\n</tool_call>',
+            token_ids=[1341, 11248, 198, 151658, 151645],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        ),
+    ]
+
+    results = _collect_results(proc, outputs)
+    tool_calls = _collect_tool_calls(results)
+
+    # -- must have exactly 1 tool call --------------------------------------
+    assert len(tool_calls) == 1
+    tc = tool_calls[0]
+    assert tc["function"]["name"] == "create_file"
+    args = json.loads(tc["function"]["arguments"])
+    assert args["path"] == "report.md"
+    assert "KV caching" in args["content"]
+    assert "transformers" in args["content"]
+
+    # -- critical assertion: argument deltas must arrive as MANY frames -----
+    # Count how many result frames contain tool_call deltas.
+    # Pre-fix: only 2-3 frames (function name, short arg, then silence until
+    # finish_reason where everything dumps at once).
+    # Post-fix: ~20 frames (one per parser delta).
+    frames_with_tool_calls = sum(
+        1 for r in results if r.get("delta", {}).get("tool_calls")
+    )
+    # With the fix, each of the 21 outputs (minus the ones before tool parsing
+    # starts) should produce a frame. We expect at least 15 frames to confirm
+    # incremental flushing (the exact count depends on when the parser starts
+    # producing tool_calls vs content).
+    assert frames_with_tool_calls >= 15, (
+        f"Expected at least 15 frames with tool_calls (incremental flush), "
+        f"but got {frames_with_tool_calls}. This indicates argument deltas "
+        f"are being withheld until finish_reason."
+    )
+
+    # -- finish_reason must be remapped to "tool_calls" ---------------------
+    finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
+    assert finish_reasons == ["tool_calls"]
+
+
+@pytest.mark.vllm
+def test_streaming_tool_call_multi_parameter_still_streams(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Regression: short multi-parameter tools should still stream incrementally.
+
+    After the fix, ensure that a tool with many short parameters (where the
+    parser returns None between parameters) still emits multiple frames
+    rather than accumulating everything.
+    """
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=None,
+        chat_template_kwargs={},
+    )
+
+    # Tool with multiple short parameters, each separated by markup where
+    # the parser might return None.
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text='<tool_call>\n{"name": "multi_param", "arguments": {',
+            token_ids=[151657, 198, 4913, 606, 788, 330, 7020, 10669, 497, 330, 16370, 788, 5212],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text='"f1": "a", ',
+            token_ids=[330, 69, 16, 788, 330, 64, 497],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text='"f2": "b", ',
+            token_ids=[330, 69, 17, 788, 330, 65, 497],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text='"f3": "c", ',
+            token_ids=[330, 69, 18, 788, 330, 66, 497],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text='"f4": "d"}}\n</tool_call>',
+            token_ids=[330, 69, 19, 788, 330, 67, 1341, 11248, 198, 151658, 151645],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        ),
+    ]
+
+    results = _collect_results(proc, outputs)
+    tool_calls = _collect_tool_calls(results)
+
+    assert len(tool_calls) == 1
+    tc = tool_calls[0]
+    assert tc["function"]["name"] == "multi_param"
+
+    # Should produce multiple frames (at least 3)
+    frames_with_tool_calls = sum(
+        1 for r in results if r.get("delta", {}).get("tool_calls")
+    )
+    assert frames_with_tool_calls >= 3, (
+        f"Expected at least 3 frames for multi-parameter tool, got {frames_with_tool_calls}"
+    )
+
+    finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
+    assert finish_reasons == ["tool_calls"]
+
+
+@pytest.mark.vllm
+def test_streaming_finish_reason_remap_still_works(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Ensure finish_reason remapping from 'stop' to 'tool_calls' still works after fix."""
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=None,
+        chat_template_kwargs={},
+    )
+
+    # Simple tool call ending with finish_reason="stop"
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text='<tool_call>\n{"name": "test", "arguments": {"a": "1"}}\n</tool_call>',
+            token_ids=[151657, 198, 1001, 151658, 151645],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        ),
+    ]
+
+    results = _collect_results(proc, outputs)
+    tool_calls = _collect_tool_calls(results)
+
+    assert len(tool_calls) == 1
+    # The critical check: finish_reason must be remapped to "tool_calls"
+    finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
+    assert finish_reasons == ["tool_calls"], (
+        f"finish_reason should be remapped from 'stop' to 'tool_calls', got {finish_reasons}"
+    )

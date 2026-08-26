@@ -616,10 +616,11 @@ class StreamingPostProcessor:
                 choice = self._build_choice(output, {})
         elif delta_message.tool_calls:
             self._merge_streaming_tool_calls(delta_message.tool_calls)
-            if output.finish_reason and self.in_progress_tool_calls:
-                # Tool calls and finish_reason arrived in the same chunk.
-                # Emit now — there will be no subsequent process_output call
-                # to drain the buffer.
+            if self.in_progress_tool_calls:
+                # Emit every parser delta immediately. A chunk where the
+                # parser returns nothing never occurs inside a long string
+                # argument, so waiting for one holds the whole value back
+                # until finish_reason.
                 choice = self._emit_tool_calls_choice(output)
         elif delta_message.content or delta_message.reasoning:
             delta = {"role": "assistant"}
