@@ -5,8 +5,6 @@
 Test the /v1/responses/input_tokens endpoint for token counting.
 """
 
-import json
-import pytest
 import requests
 
 
