@@ -639,43 +639,55 @@ mod tests {
         assert!(!fired.load(Ordering::SeqCst));
     }
 
+    /// Verifies that timeout and unavailable render errors map to the correct
+    /// PickError variants. The pick() method's fallback logic (lines 290-341)
+    /// catches these specific variants and degrades to load-only scoring instead
+    /// of failing the pick. Other render errors still fail the pick.
     #[test]
-    fn render_timeout_and_unavailable_errors_are_degradable() {
+    fn tokenize_error_classification_for_degradation() {
         use crate::vllm_render_client::VllmRenderError;
-        use std::time::Duration;
+        use reqwest::StatusCode;
 
-        // Test that timeout errors would trigger fallback logic
-        let timeout_error = TokenizeError::Render(VllmRenderError::Timeout {
+        // Timeout errors map to TokenizerTimeout (degradable in pick())
+        let timeout_err = TokenizeError::Render(VllmRenderError::Timeout {
             timeout: Duration::from_secs(5),
-            source: reqwest::Error::new(
-                reqwest::error::Kind::Request,
-                Some(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "timeout",
-                ))),
-            ),
+            source: reqwest::Error::builder(reqwest::error::ErrorKind::Request)
+                .url("http://renderer:8000/v1/chat/completions/render".parse().unwrap())
+                .build(),
         });
-
-        // Timeout errors should be caught in the match arms in pick() for fallback
         assert!(matches!(
-            timeout_error,
-            TokenizeError::Render(VllmRenderError::Timeout { .. })
+            timeout_err.into_pick_error("test-req"),
+            PickError::TokenizerTimeout
         ));
 
-        // Test that unavailable errors would trigger fallback logic
-        let unavailable_error = TokenizeError::Render(VllmRenderError::Unavailable {
-            source: reqwest::Error::new(
-                reqwest::error::Kind::Request,
-                Some(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionRefused,
-                    "connection refused",
-                ))),
-            ),
+        // Unavailable errors map to TokenizerUnavailable (degradable in pick())
+        let unavail_err = TokenizeError::Render(VllmRenderError::Unavailable {
+            source: reqwest::Error::builder(reqwest::error::ErrorKind::Request)
+                .url("http://renderer:8000/v1/chat/completions/render".parse().unwrap())
+                .build(),
         });
-
         assert!(matches!(
-            unavailable_error,
-            TokenizeError::Render(VllmRenderError::Unavailable { .. })
+            unavail_err.into_pick_error("test-req"),
+            PickError::TokenizerUnavailable
+        ));
+
+        // Invalid body errors are NOT degradable (still fail the pick)
+        let invalid_body_err = TokenizeError::InvalidBody(
+            serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err(),
+        );
+        assert!(matches!(
+            invalid_body_err.into_pick_error("test-req"),
+            PickError::TokenizationFailed(_)
+        ));
+
+        // Upstream 500 errors are NOT degradable (still fail the pick)
+        let upstream_err = TokenizeError::Render(VllmRenderError::UpstreamStatus {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "internal error".to_string(),
+        });
+        assert!(matches!(
+            upstream_err.into_pick_error("test-req"),
+            PickError::TokenizerUpstreamError
         ));
     }
 }
