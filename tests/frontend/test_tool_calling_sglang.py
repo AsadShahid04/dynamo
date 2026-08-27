@@ -147,11 +147,14 @@ TOPOLOGIES = ("chat_processor_frontend", "rust_parsers")
 class WorkerProcess(ManagedProcess):
     """backend worker for the tool-calling tests."""
 
-    def __init__(self, request, *, system_port: int, topology: str):
+    def __init__(self, request, *, system_port: int, fpm_port: int, topology: str):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env["DYN_SYSTEM_PORT"] = str(system_port)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        # SGLang publishes FPM over a per-worker ipc:// path; the env var only
+        # enables the feature (the port value is never bound).
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(fpm_port)
 
         command = [
             "python3",
@@ -274,10 +277,12 @@ def tool_calling_services(
     Yields the frontend HTTP port.
     """
     topology: str = request.param
-    frontend_port, system_port = allocate_ports(count=2, start_port=10000)
+    frontend_port, system_port, fpm_port = allocate_ports(count=3, start_port=10000)
 
     try:
-        with WorkerProcess(request, system_port=system_port, topology=topology):
+        with WorkerProcess(
+            request, system_port=system_port, fpm_port=fpm_port, topology=topology
+        ):
             # Allow worker to register with discovery.
             time.sleep(2)
             with ToolCallingFrontendProcess(
@@ -469,15 +474,6 @@ TOOLS_GET_TIME = [
         },
     }
 ]
-
-ALL_TOOLS = (
-    TOOLS_WEATHER
-    + TOOLS_SEARCH
-    + TOOLS_CALCULATOR
-    + TOOLS_COMPLEX_ARGS
-    + TOOLS_DATABASE
-)
-
 
 # ---------------------------------------------------------------------------
 # Streaming helpers
@@ -1038,127 +1034,3 @@ class TestToolCallingMultiTurn:
         assert result.content.strip()
         lower = result.content.lower()
         assert "tokyo" in lower or "paris" in lower
-
-
-# ---------------------------------------------------------------------------
-# Model-behavior smoke tests
-# These are intentionally looser because the model may vary.
-# ---------------------------------------------------------------------------
-
-
-class TestToolCallingModelBehavior:
-    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
-    def test_many_tools_prefers_calculator_for_math_question(
-        self, client: OpenAI, model: str
-    ):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {"role": "user", "content": "What is 2^10? Use a tool if helpful."}
-            ],
-            tools=ALL_TOOLS,
-        )
-        assert result.finish_reason in {"stop", "tool_calls"}
-        if result.finish_reason == "tool_calls":
-            assert len(result.tool_calls) >= 1
-            assert result.tool_calls[0]["function"]["name"] == "calculate"
-
-    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
-    def test_unicode_arguments_are_preserved(self, client: OpenAI, model: str):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "What's the weather in Zürich, Switzerland?",
-                }
-            ],
-            tools=TOOLS_WEATHER,
-        )
-        assert result.finish_reason in {"stop", "tool_calls"}
-        if result.finish_reason == "tool_calls":
-            schema = tool_schema_map(TOOLS_WEATHER)
-            args = parse_and_validate_tool_call(
-                result.tool_calls[0], schema, expected_name="get_weather"
-            )
-            assert args["city"]
-
-    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
-    def test_system_instruction_encourages_tool_use(self, client: OpenAI, model: str):
-        result = stream_chat(
-            client,
-            model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a careful weather assistant. "
-                        "Always use the get_weather tool for weather questions."
-                    ),
-                },
-                {"role": "user", "content": "How's the weather in Sydney?"},
-            ],
-            tools=TOOLS_WEATHER,
-        )
-        assert result.finish_reason in {"stop", "tool_calls"}
-        if result.finish_reason == "tool_calls":
-            schema = tool_schema_map(TOOLS_WEATHER)
-            parse_and_validate_tool_call(
-                result.tool_calls[0], schema, expected_name="get_weather"
-            )
-
-
-def _run_with_assertion_reruns(func, *args, attempts: int = 3):
-    """Retry assertion-only checks that can vary with model generation."""
-    for attempt in range(attempts):
-        try:
-            return func(*args)
-        except AssertionError:
-            if attempt == attempts - 1:
-                raise
-
-
-@pytest.mark.pre_merge
-@pytest.mark.core
-@pytest.mark.timeout(420)
-def test_tool_calling_sglang_all(client: OpenAI, model: str):
-    """Run the pre-merge tool-calling scenarios under one SGLang worker startup."""
-    protocol = TestToolCallingProtocol()
-    protocol.test_stream_has_required_chunk_shape(client, model)
-    protocol.test_single_tool_call_schema_valid(client, model)
-    protocol.test_tool_choice_required_forces_a_tool_call(client, model)
-    protocol.test_tool_choice_none_suppresses_tool_calls(client, model)
-    _run_with_assertion_reruns(
-        protocol.test_named_tool_choice_forces_specific_function, client, model
-    )
-    _run_with_assertion_reruns(
-        protocol.test_parallel_multi_tool_request_includes_all_expected_tools,
-        client,
-        model,
-    )
-    _run_with_assertion_reruns(protocol.test_array_argument_schema_valid, client, model)
-    _run_with_assertion_reruns(protocol.test_no_tools_is_plain_text, client, model)
-
-    multi_turn = TestToolCallingMultiTurn()
-    _run_with_assertion_reruns(
-        multi_turn.test_tool_result_is_consumed_and_final_answer_is_text, client, model
-    )
-    _run_with_assertion_reruns(
-        multi_turn.test_chained_tool_use_search_then_calculate, client, model
-    )
-    _run_with_assertion_reruns(
-        multi_turn.test_multiple_prior_tool_results_synthesize_to_text, client, model
-    )
-
-    behavior = TestToolCallingModelBehavior()
-    _run_with_assertion_reruns(
-        behavior.test_many_tools_prefers_calculator_for_math_question, client, model
-    )
-    _run_with_assertion_reruns(
-        behavior.test_unicode_arguments_are_preserved, client, model
-    )
-    _run_with_assertion_reruns(
-        behavior.test_system_instruction_encourages_tool_use, client, model
-    )

@@ -118,6 +118,7 @@ fn load_test_data(file_path: &str) -> TestData {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -173,6 +174,7 @@ async fn parse_response_stream(
                 None,  // No tool_choice in this test
                 None,  // No tool_definitions in this test
                 false, // No structural_tag in this test
+                false,
                 stream,
             ))
         } else {
@@ -1425,6 +1427,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             event: None,
             comment: None,
@@ -1535,6 +1538,210 @@ mod tests {
             "Should extract both tool calls even without section_end"
         );
         assert_eq!(aggregated.tool_calls.len(), 2);
+    }
+
+    // ── Streaming-jail markup suppression (hermes / qwen25) ─────────────────
+    // These exercise `create_tool_call_choice`'s no-tool-calls finalize branch
+    // directly. The conformance suite validates the batch parser, not this
+    // streaming-jail glue, so it lives here in-repo.
+
+    /// Truncated wrapper with leading prose: keep the prose, drop the markup.
+    #[tokio::test]
+    async fn test_hermes_stream_truncated_with_prose_keeps_prose_drops_markup() {
+        let chunks = vec![
+            make_chunk(
+                "I'll check the weather. <tool_call>{\"name\": \"get_w",
+                None,
+            ),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no call should be recovered; got {:?}",
+            agg.tool_calls
+        );
+        assert!(
+            !agg.normal_content.contains("<tool_call>"),
+            "markup must not leak; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("I'll check the weather"),
+            "pre-marker prose must be preserved; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Truncated wrapper with no prose: content suppressed to empty.
+    #[tokio::test]
+    async fn test_hermes_stream_truncated_no_prose_is_empty() {
+        let chunks = vec![
+            make_chunk("<tool_call>{\"name\": \"get_w", None),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no call should be recovered; got {:?}",
+            agg.tool_calls
+        );
+        assert!(
+            agg.normal_content.trim().is_empty(),
+            "truncated call with no prose must suppress to empty; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Orphan close with no opener: strip the markers, keep the inner body.
+    #[tokio::test]
+    async fn test_hermes_stream_orphan_close_strips_markers_keeps_body() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}</tool_call></tool_call></tool_call>",
+            Some(FinishReason::Length),
+        )];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.normal_content.contains("</tool_call>"),
+            "orphan close markers must be stripped; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("get_weather"),
+            "inner JSON body must be kept; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Mid-buffer orphan close: every occurrence is removed, not just trailing
+    /// ones (guards the `.replace()` over trim-suffix).
+    #[tokio::test]
+    async fn test_hermes_stream_mid_buffer_orphan_close_stripped() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\"}</tool_call> and then more text",
+            Some(FinishReason::Length),
+        )];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.normal_content.contains("</tool_call>"),
+            "a mid-buffer orphan marker must be stripped, not just trailing ones; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("more text"),
+            "surrounding text must be preserved; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// qwen25 shares the never-leak gate: same suppression for truncated and
+    /// orphan-close streams.
+    #[tokio::test]
+    async fn test_qwen25_stream_suppresses_truncated_and_orphan() {
+        // truncated mid-body -> empty
+        let truncated = vec![
+            make_chunk("<tool_call>{\"name\": \"get_w", None),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let agg = aggregate_content_from_chunks(
+            &parse_response_stream(
+                stream::iter(truncated),
+                true,
+                false,
+                Some("qwen25".to_string()),
+                None,
+            )
+            .await,
+        );
+        assert!(
+            agg.normal_content.trim().is_empty() && !agg.has_tool_calls,
+            "qwen25 truncated must suppress to empty; got: {:?}",
+            agg.normal_content
+        );
+
+        // orphan close -> markers stripped, body kept
+        let orphan = vec![make_chunk(
+            "{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}</tool_call></tool_call></tool_call>",
+            Some(FinishReason::Length),
+        )];
+        let agg = aggregate_content_from_chunks(
+            &parse_response_stream(
+                stream::iter(orphan),
+                true,
+                false,
+                Some("qwen25".to_string()),
+                None,
+            )
+            .await,
+        );
+        assert!(
+            !agg.normal_content.contains("</tool_call>")
+                && agg.normal_content.contains("get_weather"),
+            "qwen25 orphan close must strip markers and keep the body; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// False-positive: content with no tool-call markers passes through verbatim
+    /// (suppression must not eat ordinary prose).
+    #[tokio::test]
+    async fn test_hermes_stream_no_markers_passes_through_verbatim() {
+        let text = "I will not call any tools today.";
+        let chunks = vec![make_chunk(text, Some(FinishReason::Stop))];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no tool calls expected; got {:?}",
+            agg.tool_calls
+        );
+        assert_eq!(
+            agg.normal_content, text,
+            "marker-free prose must pass through unchanged; got: {:?}",
+            agg.normal_content
+        );
     }
 
     /// `TOOLCALLING.stream.4.b` — Kimi K2 truncated mid-argument (no
@@ -1708,4 +1915,408 @@ mod tests {
             "finish_reason validation failed for recovered orphan DeepSeek V3.1 call"
         );
     }
+
+    // The jail moved to dynamo-parsers and operates on the shared
+    // `Create` payload, so the boundary adapter (apply_tool_calling_jail) must
+    // buffer the dynamo-only typed `llm_metrics` and re-attach it. This asserts
+    // the buffered chunk_tokens sum and latest output_tokens survive the jail on
+    // a tool-call stream (they'd all be None without the buffer/re-attach).
+    #[tokio::test]
+    async fn jail_preserves_llm_metrics_across_buffered_tool_call() {
+        use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+            CreateChatCompletionStreamResponse, Role,
+        };
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+
+        fn chunk(
+            text: &str,
+            chunk_tokens: usize,
+            output_tokens: usize,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            #[allow(deprecated)]
+            let choice = ChatChoiceStream {
+                index: 0,
+                delta: ChatCompletionStreamResponseDelta {
+                    role: Some(Role::Assistant),
+                    content: Some(ChatCompletionMessageContent::Text(text.to_string())),
+                    tool_calls: None,
+                    function_call: None,
+                    refusal: None,
+                    reasoning_content: None,
+                },
+                finish_reason: None,
+                logprobs: None,
+            };
+            Annotated {
+                data: Some(NvCreateChatCompletionStreamResponse {
+                    inner: CreateChatCompletionStreamResponse {
+                        id: "id".to_string(),
+                        object: "chat.completion.chunk".to_string(),
+                        created: 0,
+                        model: "m".to_string(),
+                        choices: vec![choice],
+                        usage: None,
+                        service_tier: None,
+                        system_fingerprint: None,
+                    },
+                    nvext: None,
+                    llm_metrics: Some(LLMMetricAnnotation {
+                        input_tokens: 7,
+                        output_tokens,
+                        chunk_tokens,
+                        cached_tokens: None,
+                        prefill_worker_id: None,
+                        prefill_dp_rank: None,
+                        prefill_worker_type: None,
+                        decode_worker_id: None,
+                        decode_dp_rank: None,
+                        decode_worker_type: None,
+                        tokenize_latency: None,
+                        detokenize_total_latency: None,
+                        detokenize_count: None,
+                        ..Default::default()
+                    }),
+                }),
+                id: None,
+                event: None,
+                comment: None,
+                error: None,
+            }
+        }
+
+        // Hermes tool call split across two metric-bearing chunks -> the jail
+        // buffers both, then emits one tool-call chunk.
+        let chunks = vec![
+            chunk("<tool_call>\n{\"name\": \"get_weather\", \"arg", 3, 3),
+            chunk("uments\": {\"location\": \"SF\"}}\n</tool_call>", 4, 7),
+        ];
+        let out: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            None,
+            None,
+            false,
+            false,
+            Box::pin(futures::stream::iter(chunks)),
+        )
+        .collect()
+        .await;
+
+        let total_chunk_tokens: usize = out
+            .iter()
+            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
+            .map(|m| m.chunk_tokens)
+            .sum();
+        assert_eq!(
+            total_chunk_tokens, 7,
+            "buffered chunk_tokens (3+4) must survive the jail; got {total_chunk_tokens}"
+        );
+        let max_osl = out
+            .iter()
+            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
+            .map(|m| m.output_tokens)
+            .max();
+        assert_eq!(
+            max_osl,
+            Some(7),
+            "final cumulative output_tokens must survive the jail"
+        );
+    }
+}
+
+// --- glm47 streaming truncation recovery tests ---
+//
+// These drive the full apply_tool_calling_jail path so the ChoiceRecovery
+// buffer, recovered latch, and pass-2 prose-stripping are all exercised.
+
+fn make_glm47_chunk(
+    content: Option<&str>,
+    finish_reason: Option<FinishReason>,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    use dynamo_protocols::types::CreateChatCompletionStreamResponse;
+    let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+        content: content.map(|s| ChatCompletionMessageContent::Text(s.to_string())),
+        tool_calls: None,
+        role: None,
+        function_call: None,
+        refusal: None,
+        reasoning_content: None,
+    };
+    let choice = ChatChoiceStream {
+        index: 0,
+        delta,
+        finish_reason,
+        logprobs: None,
+    };
+    Annotated {
+        id: Some("id".to_string()),
+        data: Some(NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "id".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 0,
+                model: "m".to_string(),
+                choices: vec![choice],
+                usage: None,
+                service_tier: None,
+                system_fingerprint: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        }),
+        event: None,
+        comment: None,
+        error: None,
+    }
+}
+
+async fn run_glm47_jail(
+    chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+    OpenAIPreprocessor::apply_tool_calling_jail(
+        Some("glm47".to_string()),
+        None,
+        None,
+        false,
+        false,
+        Box::pin(stream::iter(chunks)),
+    )
+    .collect()
+    .await
+}
+
+fn content_texts(chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Vec<String> {
+    chunks
+        .iter()
+        .filter_map(|a| a.data.as_ref())
+        .flat_map(|d| d.inner.choices.iter())
+        .filter_map(|c| c.delta.content.as_ref())
+        .map(|c| match c {
+            ChatCompletionMessageContent::Text(t) => t.clone(),
+            _ => String::new(),
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+// Backend sends content chunks then a data-less terminal chunk with finish_reason=length.
+// The latch must fire on the first finish chunk and not re-fire on the terminal one.
+#[tokio::test]
+async fn test_glm47_streaming_truncated_data_less_terminal_chunk() {
+    let chunks = vec![
+        make_glm47_chunk(
+            Some("<tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos"),
+            None,
+        ),
+        make_glm47_chunk(None, Some(FinishReason::Length)),
+    ];
+    let out = run_glm47_jail(chunks).await;
+
+    let texts = content_texts(&out);
+    assert_eq!(texts.len(), 1, "exactly one recovery chunk; got: {texts:?}");
+    assert!(
+        texts[0].contains("<tool_call>"),
+        "recovery must contain the truncated markup; got: {:?}",
+        texts[0]
+    );
+    // Latch: a second finish_reason=length chunk must not produce a second copy.
+    assert_eq!(
+        out.iter()
+            .filter(|a| {
+                a.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.finish_reason)
+                    == Some(FinishReason::Length)
+            })
+            .count(),
+        1,
+        "finish_reason=length must appear exactly once in output"
+    );
+}
+
+// Prose follows a complete tool call, then a truncated second call — all in one jailed
+// buffer. The jail releases the prose+tail verbatim; pass 2 must suppress it and emit
+// only the tail via the recovery chunk (tail_already_emitted path).
+#[tokio::test]
+async fn test_glm47_streaming_prose_plus_truncated_block_tail_already_emitted() {
+    let complete =
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call>";
+    let prose_and_tail = "tail prose <tool_call>get_time<arg_key>tz</arg_key><arg_value>US/E";
+    let chunks = vec![
+        make_glm47_chunk(Some(complete), None),
+        make_glm47_chunk(Some(prose_and_tail), Some(FinishReason::Length)),
+    ];
+    let out = run_glm47_jail(chunks).await;
+
+    let texts = content_texts(&out);
+    // The jail splits the finish chunk: it emits "tail prose " as a separate
+    // earlier content chunk (unavoidable — already left the jail), then puts
+    // "<tool_call>get_time..." on the finish chunk. Pass 2 suppresses the finish
+    // chunk's content; the recovery chunk carries just the marker-onwards tail.
+    // Net invariant: the truncated block appears exactly once (from recovery),
+    // never duplicated from the finish chunk.
+    let recovery: Vec<_> = texts
+        .iter()
+        .filter(|t| t.contains("<tool_call>get_time"))
+        .collect();
+    assert_eq!(
+        recovery.len(),
+        1,
+        "truncated second call must appear exactly once (no duplicate); got: {texts:?}"
+    );
+}
+
+// CJK chars are 3 bytes each in UTF-8. If a multi-byte char straddles the
+// keep_from boundary the drain() call would panic without the is_char_boundary
+// walk-back. This test verifies the walk-back prevents that panic on ordinary
+// CJK output that contains no <tool_call> marker.
+#[tokio::test]
+async fn test_glm47_streaming_cjk_content_no_marker_no_panic() {
+    // "你好世界" = 4 CJK chars = 12 bytes; the None arm computes
+    // keep_from = len - (START.len() - 1) = 12 - 10 = 2, which is NOT a
+    // char boundary. The walk-back must move it to 0 to avoid a panic.
+    let cjk = "你好世界更多的中文内容";
+    let chunks = vec![
+        make_glm47_chunk(Some(cjk), None),
+        make_glm47_chunk(None, Some(FinishReason::Stop)),
+    ];
+    // Must not panic.
+    let out = run_glm47_jail(chunks).await;
+    assert!(!out.is_empty());
+}
+
+// Same walk-back check with emoji (4-byte UTF-8) straddling the boundary.
+#[tokio::test]
+async fn test_glm47_streaming_emoji_content_no_marker_no_panic() {
+    // Each emoji is 4 bytes; "🎉🎊🎈" = 12 bytes; keep_from = 12 - 10 = 2,
+    // not a char boundary — walk-back must reach 0.
+    let emoji = "🎉🎊🎈🚀✨";
+    let chunks = vec![
+        make_glm47_chunk(Some(emoji), None),
+        make_glm47_chunk(None, Some(FinishReason::Stop)),
+    ];
+    let out = run_glm47_jail(chunks).await;
+    assert!(!out.is_empty());
+}
+
+// A partial, never-closed DSML invoke (same payload the finalize-recovery test above
+// proves the vendored jail WILL complete into a real `ToolCalls` chunk on a clean EOF
+// with no finish_reason at all — see
+// `test_deepseek_v4_stream_finalize_recovers_complete_invoke_without_outer_close`'s
+// sibling behavior, reproduced directly against bare EOF below) — but this time the
+// upstream stream ends in an error instead of a clean EOF. The jail's own vendored
+// finalize logic cannot distinguish "upstream failed" from "upstream legitimately
+// finished", so without the wrapper's error short-circuit it would still synthesize
+// and emit that same completed (but never actually confirmed) tool call — a data
+// fabrication bug: the request failed, yet the caller would see a normal-looking
+// `finish_reason: ToolCalls` with a plausible `location: "NYC"` argument that was never
+// truly finished being generated.
+fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+    Annotated {
+        id: Some("probe".to_string()),
+        data: Some(NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "probe".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 0,
+                model: "m".to_string(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                        role: Some(dynamo_protocols::types::Role::Assistant),
+                        content: Some(ChatCompletionMessageContent::Text(
+                            "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>"
+                                .to_string(),
+                        )),
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+                service_tier: None,
+                system_fingerprint: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        }),
+        event: None,
+        comment: None,
+        error: None,
+    }
+}
+
+// Empirically confirms the vendored jail DOES finalize a complete tool call from bare
+// EOF with no finish_reason ever seen — the exact mechanism finding #6 describes. This
+// is the "red" half of the regression below: same payload, but terminated by a clean
+// EOF instead of an upstream error, is EXPECTED to recover the tool call normally.
+#[tokio::test]
+async fn test_deepseek_v4_finalize_recovers_at_bare_eof_with_no_finish_reason() {
+    let output_chunks = parse_response_stream(
+        stream::iter(vec![deepseek_v4_partial_invoke_chunk()]),
+        true,
+        false,
+        Some("deepseek_v4".to_string()),
+        None,
+    )
+    .await;
+
+    let aggregated = aggregate_content_from_chunks(&output_chunks);
+    assert!(
+        aggregated.has_tool_calls,
+        "sanity check: a clean EOF (no error) must still recover the finished invoke; \
+         got: {output_chunks:#?}"
+    );
+}
+
+// Finding #6 regression: the SAME partial invoke, but the upstream stream ends in an
+// error instead of a clean EOF. The jail wrapper must yield exactly that error and
+// nothing else — no synthesized `ToolCalls` finish chunk fabricated from the jail's
+// own EOF-triggered finalize, because the request never actually completed.
+#[tokio::test]
+async fn test_deepseek_v4_upstream_error_suppresses_jail_finalize() {
+    let output_chunks = parse_response_stream(
+        stream::iter(vec![
+            deepseek_v4_partial_invoke_chunk(),
+            Annotated::from_error("upstream disconnected"),
+        ]),
+        true,
+        false,
+        Some("deepseek_v4".to_string()),
+        None,
+    )
+    .await;
+
+    assert!(
+        !output_chunks.is_empty(),
+        "the terminal error itself must still reach the caller"
+    );
+    let last = output_chunks.last().expect("non-empty output");
+    assert!(
+        last.is_error(),
+        "the terminal error must be the LAST item in the output stream; got: {output_chunks:#?}"
+    );
+    assert_eq!(
+        output_chunks.iter().filter(|a| a.is_error()).count(),
+        1,
+        "the terminal error must be surfaced exactly once; got: {output_chunks:#?}"
+    );
+
+    let aggregated = aggregate_content_from_chunks(&output_chunks);
+    assert!(
+        !aggregated.has_tool_calls,
+        "an upstream error must suppress the jail's EOF finalize entirely — no \
+         synthesized tool call may reach the caller for a request that never actually \
+         completed; got: {output_chunks:#?}"
+    );
 }

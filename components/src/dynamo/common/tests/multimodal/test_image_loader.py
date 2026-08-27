@@ -24,7 +24,7 @@ import pytest
 from PIL import Image
 
 from dynamo.common.http import HttpStatusError, HttpTimeoutError
-from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
 
 pytestmark = [
@@ -204,13 +204,13 @@ async def test_http_timeout_raises_valueerror(loader: ImageLoader) -> None:
 
 async def test_http_status_error_propagated(loader: ImageLoader) -> None:
     """HTTP 4xx/5xx should propagate as HttpStatusError."""
-    mock_fetch = _mock_fetch_bytes(
-        side_effect=HttpStatusError(404, "Not Found", "https://example.com/img.png")
-    )
+    error = HttpStatusError(404, "Not Found", "https://example.com/img.png")
+    mock_fetch = _mock_fetch_bytes(side_effect=error)
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         with pytest.raises(HttpStatusError) as exc_info:
             await loader.load_image("https://example.com/img.png")
         assert exc_info.value.status == 404
+        assert exc_info.value is error
 
 
 # --- Cache behavior ---
@@ -260,6 +260,43 @@ async def test_unsupported_format_batch_url_raises_415(loader: ImageLoader) -> N
         assert exc_info.value.status == 415
 
 
+async def test_uuid_only_image_slots_preserve_batch_alignment(
+    loader: ImageLoader,
+) -> None:
+    first = Image.new("RGB", (1, 1), color="red")
+    second = Image.new("RGB", (1, 1), color="blue")
+    loader.load_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[first, second]
+    )
+
+    images = await loader.load_image_batch(
+        [
+            {"Url": "https://example.com/first.png"},
+            {"UuidOnly": "cached-image"},
+            {"Url": "https://example.com/second.png"},
+        ],
+        preserve_uuid_slots=True,
+    )
+
+    assert images == [first, None, second]
+
+
+async def test_uuid_only_image_slots_require_opt_in(loader: ImageLoader) -> None:
+    with pytest.raises(ValueError, match="preserve_uuid_slots=True"):
+        await loader.load_image_batch([{"UuidOnly": "cached-image"}])
+
+
+async def test_batch_propagates_cancellation(loader: ImageLoader) -> None:
+    loader.load_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=asyncio.CancelledError
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await loader.load_image_batch(
+            [{URL_VARIANT_KEY: "https://example.com/image.png"}]
+        )
+
+
 async def test_unsupported_format_batch_data_url_raises_415(
     loader: ImageLoader,
 ) -> None:
@@ -270,6 +307,66 @@ async def test_unsupported_format_batch_data_url_raises_415(
             [{URL_VARIANT_KEY: f"data:image/svg+xml;base64,{svg_b64}"}]
         )
     assert exc_info.value.status == 415
+
+
+# --- SSRF / URL-validation error contract ---
+
+
+# Cloud metadata IP (link-local) -- the canonical SSRF target; rejected as a
+# blocked IP literal before any DNS/connect, so this test makes no network call.
+_METADATA_IP_URL = "https://169.254.169.254/latest/meta-data/"
+
+
+async def test_ssrf_blocked_batch_url_raises_url_validation_error() -> None:
+    """An SSRF-blocked URL must escape load_image_batch as UrlValidationError (a
+    ValueError -> 4xx), not the bare Exception the aggregator used to raise (500)."""
+    strict_loader = ImageLoader(
+        cache_size=4, http_timeout=30.0, url_policy=UrlValidationPolicy()
+    )
+    with pytest.raises(UrlValidationError, match="blocked range"):
+        await strict_loader.load_image_batch([{URL_VARIANT_KEY: _METADATA_IP_URL}])
+
+
+async def test_url_validation_error_from_fetch_preserved(
+    loader: ImageLoader,
+) -> None:
+    """A UrlValidationError raised mid-fetch (redirect revalidation) must survive
+    _fetch_and_process's except branch, not be flattened to a plain ValueError."""
+    error = UrlValidationError("Too many redirects (max=3)")
+    mock_fetch = _mock_fetch_bytes(side_effect=error)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(UrlValidationError, match="Too many redirects") as exc_info:
+            await loader.load_image_batch(
+                [{URL_VARIANT_KEY: "https://example.com/img.png"}]
+            )
+
+    assert exc_info.value is error
+
+
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.svg"),
+    ],
+)
+async def test_image_batch_prioritizes_typed_client_error(
+    loader: ImageLoader, client_error: Exception
+) -> None:
+    """A concurrent decode failure cannot erase a terminal client verdict."""
+    loader.load_image = AsyncMock(
+        side_effect=[RuntimeError("decode failed"), client_error]
+    )
+
+    with pytest.raises(type(client_error)) as exc_info:
+        await loader.load_image_batch(
+            [
+                {URL_VARIANT_KEY: "https://example.com/bad.png"},
+                {URL_VARIANT_KEY: "https://example.com/rejected.png"},
+            ]
+        )
+
+    assert exc_info.value is client_error
 
 
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:

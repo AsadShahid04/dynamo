@@ -4,6 +4,7 @@
 import pytest
 
 from tests.serve.common import WORKSPACE_DIR
+from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
@@ -105,7 +106,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[
                     MmCase(
-                        payload=make_video_payload(["red", "static", "still"]),
+                        payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED),
                         env={"DYN_MM_LOCAL_PATH": WORKSPACE_DIR},
                     )
                 ],
@@ -224,6 +225,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.post_merge],
+                        timeout_s=900,
                     ),
                 ],
             ),

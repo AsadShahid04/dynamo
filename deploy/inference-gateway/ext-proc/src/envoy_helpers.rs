@@ -16,7 +16,7 @@ use crate::proto::envoy::service::ext_proc::v3::{
 use crate::proto::envoy::r#type::v3::{HttpStatus, StatusCode};
 
 /// EPP protocol constants from proposal 004-endpoint-picker-protocol.
-/// These match both the full EPP and the LW-EPP from GAIE (issue #2834[https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2834]).
+/// These match both the full EPP and the LW-EPP from GAIE (issue #2834 <https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2834>).
 pub mod metadata {
     pub const SUBSET_FILTER_NAMESPACE: &str = "envoy.lb.subset_hint";
     pub const SUBSET_FILTER_KEY: &str = "x-gateway-destination-endpoint-subset";
@@ -150,7 +150,7 @@ pub fn build_request_header_response(
         }
         tracing::debug!(key = %key, value = %value, "Adding header to ext_proc mutation");
         // OverwriteIfExistsOrAdd: these are gateway-owned routing headers
-        // (x-worker-instance-id, x-prefill-instance-id, x-dp-rank,
+        // (x-dynamo-worker-instance-id, x-dynamo-prefill-instance-id, x-dynamo-dp-rank,
         // x-dynamo-routing-mode, nvext.token_data, ...). The backend must
         // treat the EPP's value as authoritative; appending to a
         // client-supplied value would corrupt routing and let clients

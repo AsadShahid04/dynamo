@@ -22,35 +22,89 @@ Runtime data-contract notes (not code-level shims):
 
 import inspect
 import logging
-from functools import lru_cache
+from collections.abc import Mapping
+from functools import lru_cache, wraps
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Top-level sglang exports: Engine, ServerArgs
-#
-# Some SGLang dev builds (including 0.5.x snapshots) do not re-export these
-# from sglang/__init__.py, while Dynamo historically uses `import sglang as sgl`
-# followed by `sgl.Engine(...)` throughout this backend.
-# ---------------------------------------------------------------------------
-def ensure_sglang_top_level_exports() -> None:
-    """Restore top-level SGLang exports omitted by some install flavors."""
-    import sglang as sgl
-
-    if not hasattr(sgl, "Engine"):
-        from sglang.srt.entrypoints.engine import Engine
-
-        sgl.Engine = Engine
-
-    if not hasattr(sgl, "ServerArgs"):
-        from sglang.srt.server_args import ServerArgs
-
-        sgl.ServerArgs = ServerArgs
+@lru_cache(maxsize=1)
+def _warn_require_reasoning_unsupported() -> None:
+    logger.warning(
+        "Dropping require_reasoning=true because SGLang Engine.async_generate "
+        "does not support it; reasoning-aware guided decoding may fail. "
+        "Upgrade SGLang to enable this request mode."
+    )
 
 
-ensure_sglang_top_level_exports()
+def ensure_sglang_tensor_image_size() -> None:
+    """Allow SGLang's image-token resolver to handle decoded image tensors.
+
+    SGLang 0.5.13 through 0.5.18 assume every decoded image exposes the PIL
+    ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
+    CHW tensor, causing multimodal requests to fall back to retokenization.
+
+    Remove this compatibility override once the minimum supported SGLang
+    release handles tensor image dimensions itself.
+    """
+    import torch
+    from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+    original = getattr(BaseMultimodalProcessor, "resolve_image_token_counts", None)
+    if original is None or getattr(
+        original, "_dynamo_tensor_image_size_support", False
+    ):
+        return
+
+    @wraps(original)
+    def resolve_image_token_counts(self: Any, images: list[Any]) -> list[int]:
+        if not any(isinstance(image, torch.Tensor) for image in images):
+            return original(self, images)
+
+        image_sizes: list[tuple[int, int]] = []
+        for image in images:
+            if isinstance(image, torch.Tensor):
+                if image.ndim < 2:
+                    raise ValueError(f"Invalid image tensor shape: {image.shape}")
+                height, width = image.shape[-2:]
+            else:
+                height, width = image.height, image.width
+            image_sizes.append((int(height), int(width)))
+
+        token_counts = self._processor._get_num_multimodal_tokens(
+            image_sizes=image_sizes
+        ).num_image_tokens
+        return [int(count) for count in token_counts]
+
+    resolve_image_token_counts._dynamo_tensor_image_size_support = True  # type: ignore[attr-defined]
+    BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
+
+
+def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
+    """Apply a post-resolution, pre-publish SGLang configuration update.
+
+    SGLang 0.5.18 replaced ``ServerArgs.override`` with
+    ``ServerArgs._late_resolution`` for launcher-stage updates that every holder
+    of the instance must observe. SGLang 0.5.17 exposes the former API. The
+    separately pinned XPU image still uses SGLang 0.5.11, which predates both;
+    preserve its legacy assignment behavior until its engine pin is upgraded.
+    """
+    late_resolution = getattr(server_args, "_late_resolution", None)
+    if callable(late_resolution):
+        late_resolution(source, **fields)
+        return
+
+    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override(source, **fields)
+        return
+
+    # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
+    # upgraded to 0.5.16+.
+    for name, value in fields.items():
+        setattr(server_args, name, value)
 
 
 @lru_cache(maxsize=32)
@@ -85,10 +139,12 @@ def filter_supported_async_generate_kwargs(
 ) -> dict[str, Any]:
     """Return only async_generate kwargs accepted by this SGLang engine.
 
-    SGLang occasionally adds optional Engine.async_generate kwargs before every
-    supported install flavor has them. Keep the compatibility boundary narrow:
-    callers decide which kwargs are optional, and this helper only drops those
-    optional kwargs when the installed engine cannot accept them.
+    Both supported CUDA releases accept Dynamo's optional kwargs. The separately
+    pinned XPU image still uses SGLang 0.5.11, which predates ``mm_hashes`` and
+    ``require_reasoning``. Keep the compatibility boundary narrow: callers
+    decide which kwargs are optional, and this helper only drops those optional
+    kwargs when the installed engine cannot accept them. Remove this filtering
+    when the XPU SGLang pin is upgraded to 0.5.16+.
     """
     async_generate = engine.async_generate
     signature_source = getattr(async_generate, "__func__", async_generate)
@@ -108,51 +164,21 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
-def get_scheduler_info(engine: Any) -> dict:
-    """Return the scheduler-info dict for rank-0 of an ``sgl.Engine``.
-
-    SGLang exposes per-rank scheduler stats (``max_total_num_tokens``,
-    ``max_req_input_len``, ...) on the ``Engine`` via ``_scheduler_init_result``.
-    We return the rank-0 dict, or ``{}`` if it is not reachable on this build.
-
-    Covers:
-      - sglang 0.5.10+: ``engine._scheduler_init_result.scheduler_infos[0]``
-        (canonical; also what ``Engine.get_server_info`` reads internally).
-      - Older probed attributes (``engine.scheduler_info``,
-        ``engine.tokenizer_manager.scheduler_info``) as a best-effort fallback
-        for forks/experimental branches that surfaced the dict directly.
-    """
-    result = getattr(engine, "_scheduler_init_result", None)
-    if result is not None:
-        infos = getattr(result, "scheduler_infos", None)
-        if infos:
-            return infos[0]
-
-    direct = getattr(engine, "scheduler_info", None)
-    if direct:
-        return direct
-
-    tm = getattr(engine, "tokenizer_manager", None)
-    tm_info = getattr(tm, "scheduler_info", None) if tm is not None else None
-    if tm_info:
-        return tm_info
-
-    return {}
-
-
-def enable_disjoint_streaming_output(server_args: Any) -> None:
-    """Enable SGLang's disjoint streaming output.
-
-    Diffusion workers pass a ``SimpleNamespace`` stub that does not carry the
-    field, so this is a no-op when the attribute is absent.
-    """
-    if hasattr(server_args, "incremental_streaming_output"):
-        server_args.incremental_streaming_output = True
+def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the optional SGLang per-request reasoning-gate argument."""
+    require_reasoning = bool(request.get("require_reasoning", False))
+    kwargs = filter_supported_async_generate_kwargs(
+        engine,
+        {"require_reasoning": require_reasoning},
+    )
+    if require_reasoning and "require_reasoning" not in kwargs:
+        _warn_require_reasoning_unsupported()
+    return kwargs
 
 
 __all__ = [
-    "enable_disjoint_streaming_output",
-    "ensure_sglang_top_level_exports",
+    "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
-    "get_scheduler_info",
+    "override_server_args",
+    "require_reasoning_kwargs",
 ]
