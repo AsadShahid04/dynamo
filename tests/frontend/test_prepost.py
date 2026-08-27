@@ -2035,7 +2035,23 @@ def test_streaming_tool_call_argument_deltas_flush_incrementally(
         CompletionOutput(
             index=0,
             text='"arguments": {"path": "report.md", "content": "',
-            token_ids=[330, 16370, 788, 5212, 2341, 788, 330, 6796, 624, 1447, 497, 330, 2295, 788, 330],
+            token_ids=[
+                330,
+                16370,
+                788,
+                5212,
+                2341,
+                788,
+                330,
+                6796,
+                624,
+                1447,
+                497,
+                330,
+                2295,
+                788,
+                330,
+            ],
             cumulative_logprob=None,
             logprobs=None,
         ),
@@ -2240,7 +2256,21 @@ def test_streaming_tool_call_multi_parameter_still_streams(
         CompletionOutput(
             index=0,
             text='<tool_call>\n{"name": "multi_param", "arguments": {',
-            token_ids=[151657, 198, 4913, 606, 788, 330, 7020, 10669, 497, 330, 16370, 788, 5212],
+            token_ids=[
+                151657,
+                198,
+                4913,
+                606,
+                788,
+                330,
+                7020,
+                10669,
+                497,
+                330,
+                16370,
+                788,
+                5212,
+            ],
             cumulative_logprob=None,
             logprobs=None,
         ),
@@ -2286,9 +2316,9 @@ def test_streaming_tool_call_multi_parameter_still_streams(
     frames_with_tool_calls = sum(
         1 for r in results if r.get("delta", {}).get("tool_calls")
     )
-    assert frames_with_tool_calls >= 3, (
-        f"Expected at least 3 frames for multi-parameter tool, got {frames_with_tool_calls}"
-    )
+    assert (
+        frames_with_tool_calls >= 3
+    ), f"Expected at least 3 frames for multi-parameter tool, got {frames_with_tool_calls}"
 
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
     assert finish_reasons == ["tool_calls"]
@@ -2328,6 +2358,6 @@ def test_streaming_finish_reason_remap_still_works(
     assert len(tool_calls) == 1
     # The critical check: finish_reason must be remapped to "tool_calls"
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert finish_reasons == ["tool_calls"], (
-        f"finish_reason should be remapped from 'stop' to 'tool_calls', got {finish_reasons}"
-    )
+    assert finish_reasons == [
+        "tool_calls"
+    ], f"finish_reason should be remapped from 'stop' to 'tool_calls', got {finish_reasons}"
