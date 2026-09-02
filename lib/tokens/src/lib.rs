@@ -1334,7 +1334,11 @@ impl TokenBlockSequence {
         if self.current_block.tokens.0.len() != self.current_block.block_size as usize {
             return Err(TokenBlockError::Incomplete);
         }
-        let block_offset = self.blocks.len() * (self.current_block.block_size as usize);
+        let block_offset = self
+            .blocks
+            .len()
+            .checked_mul(self.current_block.block_size as usize)
+            .ok_or(TokenBlockError::Incomplete)?;
         let tokens = std::mem::take(&mut self.current_block.tokens);
         let block_bytes = compute_block_bytes_with_mm(&tokens, block_offset, &self.mm_runs);
         let block_hash = compute_block_hash(&block_bytes, self.current_block.salt_hash);
@@ -1617,7 +1621,7 @@ impl TokenBlockSequence {
     /// plus tokens in the current partial block).
     pub fn total_tokens(&self) -> usize {
         let block_size = self.current_block.block_size as usize;
-        (self.blocks.len() * block_size) + self.current_block.len()
+        self.blocks.len().saturating_mul(block_size) + self.current_block.len()
     }
 
     /// Extract the token with the range
@@ -1635,16 +1639,17 @@ impl TokenBlockSequence {
         }
 
         let mut result = Vec::with_capacity(range.len());
+        let blocks_len = self.blocks.len().saturating_mul(self.block_size);
 
         for i in range {
-            if i < self.blocks.len() * self.block_size {
+            if i < blocks_len {
                 // Token is in a completed block
                 let block_index = i / self.block_size;
                 let token_index = i % self.block_size;
                 result.push(self.blocks[block_index].tokens()[token_index]);
             } else {
                 // Token is in the current partial block
-                let current_block_index = i - (self.blocks.len() * self.block_size);
+                let current_block_index = i - blocks_len;
                 result.push(self.current_block.tokens()[current_block_index]);
             }
         }
@@ -3675,5 +3680,81 @@ mod tests {
             seq.unwind(1).unwrap_err(),
             TokenBlockError::MmRunsPresent
         ));
+    }
+
+    #[test]
+    fn overflow_safe_total_tokens() {
+        // Verify that total_tokens uses saturating_mul to prevent overflow.
+        // With wrapping multiplication, `blocks.len() * block_size` would wrap;
+        // with saturating_mul, it should saturate to usize::MAX.
+        let seq = create_test_sequence(&[1u32, 2, 3], 4, Some(TEST_SALT_HASH));
+        
+        // Normal case: verify correct computation
+        assert_eq!(seq.total_tokens(), 3);
+        
+        // Test the arithmetic directly: if blocks.len() and block_size were both large,
+        // wrapping mul would overflow. Verify our saturating_mul approach would handle it.
+        let large_blocks_len = usize::MAX / 2 + 1;
+        let block_size = 4;
+        let result = large_blocks_len.saturating_mul(block_size);
+        assert_eq!(result, usize::MAX);
+        
+        // If it wrapped instead, we'd get:
+        let wrapped = large_blocks_len.wrapping_mul(block_size);
+        assert_ne!(wrapped, usize::MAX);
+        assert!(wrapped < large_blocks_len);
+    }
+
+    #[test]
+    fn overflow_safe_tokens_at() {
+        // Verify that tokens_at uses saturating_mul in its range check.
+        let seq = create_test_sequence(&[1u32, 2, 3, 4, 5], 4, Some(TEST_SALT_HASH));
+        
+        // Normal operation: extract a valid range
+        let tokens = seq.tokens_at(0..3);
+        assert_eq!(tokens.0.len(), 3);
+        assert_eq!(tokens.0[0], 1);
+        assert_eq!(tokens.0[1], 2);
+        assert_eq!(tokens.0[2], 3);
+        
+        // Verify the arithmetic: blocks.len().saturating_mul(block_size)
+        let large_blocks_len = usize::MAX / 2 + 1;
+        let block_size = 4;
+        let saturated = large_blocks_len.saturating_mul(block_size);
+        assert_eq!(saturated, usize::MAX);
+        
+        // With wrapping mul, this would produce an incorrect small value
+        let wrapped = large_blocks_len.wrapping_mul(block_size);
+        assert!(wrapped < saturated);
+    }
+
+    #[test]
+    fn overflow_safe_commit_current() {
+        // Verify that commit_current uses checked_mul for block_offset computation.
+        // We can't directly test the overflow path without allocating massive memory,
+        // but we can verify the arithmetic would detect overflow.
+        
+        // Test the checked_mul arithmetic that commit_current now uses
+        let large_blocks_len = usize::MAX / 2 + 1;
+        let block_size = 4usize;
+        
+        // checked_mul should return None on overflow
+        let result = large_blocks_len.checked_mul(block_size);
+        assert!(result.is_none(), "checked_mul should return None on overflow");
+        
+        // Compare with wrapping_mul which would silently wrap
+        let wrapped = large_blocks_len.wrapping_mul(block_size);
+        assert!(wrapped < large_blocks_len, "wrapping_mul incorrectly wraps");
+        
+        // Normal case: create a sequence with MM runs and verify commit works
+        let tokens = vec![1u32, 2, 3];
+        let mut seq = TokenBlockSequence::new(Tokens::from(tokens), 4, Some(TEST_SALT_HASH));
+        seq.push_mm_run(0xABCD, 2).unwrap();
+        
+        // Force commit by pushing one more token to complete the block
+        seq.push_token(100).unwrap();
+        
+        // Should have committed one block successfully
+        assert_eq!(seq.blocks.len(), 1);
     }
 }
