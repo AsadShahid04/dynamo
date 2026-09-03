@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn capture_http_headers_respects_entry_limit() {
         use axum::http::HeaderName;
-        
+
         let mut capture_list = Vec::new();
         for i in 0..100 {
             capture_list.push(format!("x-header-{}", i));
@@ -434,7 +434,10 @@ mod tests {
 
     #[test]
     fn capture_http_headers_respects_byte_limit() {
-        let large_value = "a".repeat(CAPTURE_MAX_TOTAL_BYTES);
+        // Size the first value so it fits but leaves no room for the second:
+        // "x-large" (7 bytes) + value bytes must be < CAPTURE_MAX_TOTAL_BYTES,
+        // leaving insufficient room for "x-next" (6 bytes) + "value" (5 bytes).
+        let large_value = "a".repeat(CAPTURE_MAX_TOTAL_BYTES - "x-large".len() - 1);
         let capture_list = vec!["x-large".to_string(), "x-next".to_string()];
 
         let mut headers = HeaderMap::new();
