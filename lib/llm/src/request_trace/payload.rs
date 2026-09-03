@@ -32,6 +32,12 @@ pub fn capture_http_headers(headers: &HeaderMap) -> Option<BTreeMap<String, Stri
     capture_http_headers_with_list(headers, &super::policy().http_header_capture_list)
 }
 
+/// Maximum number of headers that can be captured.
+const CAPTURE_MAX_ENTRIES: usize = 64;
+
+/// Maximum total bytes (key + value) that can be captured.
+const CAPTURE_MAX_TOTAL_BYTES: usize = 64 * 1024;
+
 fn capture_http_headers_with_list(
     headers: &HeaderMap,
     capture_list: &[String],
@@ -40,7 +46,13 @@ fn capture_http_headers_with_list(
         return None;
     }
     let mut out = BTreeMap::new();
+    let mut total_bytes = 0usize;
+
     for name in capture_list {
+        if out.len() >= CAPTURE_MAX_ENTRIES {
+            break;
+        }
+
         let joined = headers
             .get_all(name.as_str())
             .iter()
@@ -48,9 +60,26 @@ fn capture_http_headers_with_list(
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
-        if !joined.is_empty() {
-            out.insert(name.clone(), joined);
+
+        if joined.is_empty() {
+            continue;
         }
+
+        // Check if this header contains sensitive data
+        let value_to_store = if crate::http::service::sensitive::is_sensitive_header(name, &joined)
+        {
+            crate::http::service::sensitive::REDACTED_PLACEHOLDER.to_string()
+        } else {
+            joined
+        };
+
+        let entry_bytes = name.len() + value_to_store.len();
+        if total_bytes + entry_bytes > CAPTURE_MAX_TOTAL_BYTES {
+            break;
+        }
+
+        total_bytes += entry_bytes;
+        out.insert(name.clone(), value_to_store);
     }
     (!out.is_empty()).then_some(out)
 }
@@ -273,6 +302,189 @@ mod tests {
         let captured = capture_http_headers_with_list(&headers, &capture_list)
             .expect("non-empty value is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("tenant-a"));
+    }
+
+    #[test]
+    fn capture_http_headers_redacts_authorization_header() {
+        let capture_list = vec!["authorization".to_string(), "x-request-id".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret-token".parse().unwrap());
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+
+        let captured =
+            capture_http_headers_with_list(&headers, &capture_list).expect("headers captured");
+
+        assert_eq!(
+            captured.get("authorization").map(String::as_str),
+            Some(crate::http::service::sensitive::REDACTED_PLACEHOLDER),
+            "authorization header must be redacted even when allowlisted"
+        );
+        assert_eq!(
+            captured.get("x-request-id").map(String::as_str),
+            Some("abc-123"),
+            "non-sensitive header must pass through unmodified"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_redacts_bearer_token_in_custom_header() {
+        let capture_list = vec!["x-custom-auth".to_string(), "x-tenant".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-custom-auth", "Bearer custom-token".parse().unwrap());
+        headers.insert("x-tenant", "acme".parse().unwrap());
+
+        let captured =
+            capture_http_headers_with_list(&headers, &capture_list).expect("headers captured");
+
+        assert_eq!(
+            captured.get("x-custom-auth").map(String::as_str),
+            Some(crate::http::service::sensitive::REDACTED_PLACEHOLDER),
+            "bearer token in custom header must be redacted"
+        );
+        assert_eq!(
+            captured.get("x-tenant").map(String::as_str),
+            Some("acme"),
+            "non-sensitive header must pass through"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_redacts_all_sensitive_header_names() {
+        let capture_list = vec![
+            "authorization".to_string(),
+            "proxy-authorization".to_string(),
+            "cookie".to_string(),
+            "set-cookie".to_string(),
+            "x-api-key".to_string(),
+            "api-key".to_string(),
+            "x-auth-token".to_string(),
+            "x-access-token".to_string(),
+            "x-safe".to_string(),
+        ];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Basic token".parse().unwrap());
+        headers.insert("proxy-authorization", "Basic proxy".parse().unwrap());
+        headers.insert("cookie", "session=xyz".parse().unwrap());
+        headers.insert("set-cookie", "auth=abc".parse().unwrap());
+        headers.insert("x-api-key", "key123".parse().unwrap());
+        headers.insert("api-key", "key456".parse().unwrap());
+        headers.insert("x-auth-token", "token789".parse().unwrap());
+        headers.insert("x-access-token", "token000".parse().unwrap());
+        headers.insert("x-safe", "safe-value".parse().unwrap());
+
+        let captured =
+            capture_http_headers_with_list(&headers, &capture_list).expect("headers captured");
+
+        for sensitive_header in &[
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "api-key",
+            "x-auth-token",
+            "x-access-token",
+        ] {
+            assert_eq!(
+                captured.get(*sensitive_header).map(String::as_str),
+                Some(crate::http::service::sensitive::REDACTED_PLACEHOLDER),
+                "{} header must be redacted",
+                sensitive_header
+            );
+        }
+
+        assert_eq!(
+            captured.get("x-safe").map(String::as_str),
+            Some("safe-value"),
+            "non-sensitive header must pass through"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_respects_entry_limit() {
+        use axum::http::HeaderName;
+
+        let mut capture_list = Vec::new();
+        for i in 0..100 {
+            capture_list.push(format!("x-header-{}", i));
+        }
+
+        let mut headers = HeaderMap::new();
+        for i in 0..100 {
+            let name = format!("x-header-{}", i);
+            let value = format!("value-{}", i);
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+
+        let captured =
+            capture_http_headers_with_list(&headers, &capture_list).expect("headers captured");
+
+        assert_eq!(
+            captured.len(),
+            CAPTURE_MAX_ENTRIES,
+            "must not exceed entry limit"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_respects_byte_limit() {
+        // Size the first value so it fits but leaves no room for the second:
+        // "x-large" (7 bytes) + value bytes must be < CAPTURE_MAX_TOTAL_BYTES,
+        // leaving insufficient room for "x-next" (6 bytes) + "value" (5 bytes).
+        let large_value = "a".repeat(CAPTURE_MAX_TOTAL_BYTES - "x-large".len() - 1);
+        let capture_list = vec!["x-large".to_string(), "x-next".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-large", large_value.parse().unwrap());
+        headers.insert("x-next", "value".parse().unwrap());
+
+        let captured =
+            capture_http_headers_with_list(&headers, &capture_list).expect("headers captured");
+
+        assert!(
+            captured.contains_key("x-large"),
+            "first header within limit must be captured"
+        );
+        assert!(
+            !captured.contains_key("x-next"),
+            "second header exceeding limit must be dropped"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_non_sensitive_passes_through_unmodified() {
+        let capture_list = vec![
+            "x-request-id".to_string(),
+            "x-tenant".to_string(),
+            "content-type".to_string(),
+        ];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "req-123".parse().unwrap());
+        headers.insert("x-tenant", "acme-corp".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let captured =
+            capture_http_headers_with_list(&headers, &capture_list).expect("headers captured");
+
+        assert_eq!(
+            captured.get("x-request-id").map(String::as_str),
+            Some("req-123")
+        );
+        assert_eq!(
+            captured.get("x-tenant").map(String::as_str),
+            Some("acme-corp")
+        );
+        assert_eq!(
+            captured.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
     }
 
     /// Test-only constructor. `create_handle` gates on env vars + a cached

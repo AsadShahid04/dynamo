@@ -47,11 +47,7 @@ pub(crate) fn metadata_header_prefix() -> &'static str {
 }
 
 fn is_sensitive_metadata(raw_key: &str, raw_value: &str) -> bool {
-    let value: &str = raw_value.trim_start();
-    raw_key.eq_ignore_ascii_case("authorization")
-        || value
-            .get(.."bearer ".len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+    super::sensitive::is_sensitive_header(raw_key, raw_value)
 }
 
 fn insert_metadata_entry(
