@@ -268,10 +268,62 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority) = self
+        
+        // Attempt tokenization for KV-aware routing. On timeout or render
+        // unavailability, degrade to load-only scoring (empty tokens) instead of
+        // failing the pick — the engine will still apply its own context limit.
+        let (tokens, priority_jump, strict_priority) = match self
             .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
-            .map_err(|e| e.into_pick_error(&req.request_id))?;
+        {
+            Ok((tokens, priority_jump, strict_priority)) => {
+                (tokens, priority_jump, strict_priority)
+            }
+            Err(e) => {
+                // Check if this is a retryable/degradable failure
+                match &e {
+                    TokenizeError::Render(VllmRenderError::Timeout { timeout, .. }) => {
+                        tracing::warn!(
+                            request_id = %req.request_id,
+                            timeout_ms = timeout.as_millis(),
+                            "Tokenization timed out; degrading to load-only scoring"
+                        );
+                        // Extract priority from the body if possible (we already parsed
+                        // it in tokenize), but use empty tokens for load-only routing
+                        let hints: Result<RoutingHints, _> = serde_json::from_slice(&req.body);
+                        let resolved = hints.ok().and_then(|h| {
+                            h.nvext.as_ref().and_then(|n| n.agent_hints.as_ref())
+                        });
+                        let priority = resolve_request_priority(
+                            resolved,
+                            priority_header.as_deref(),
+                            strict_priority_header.as_deref(),
+                        );
+                        (Vec::new(), priority.priority_jump, priority.strict_priority)
+                    }
+                    TokenizeError::Render(VllmRenderError::Unavailable { .. }) => {
+                        tracing::warn!(
+                            request_id = %req.request_id,
+                            "Tokenizer unavailable; degrading to load-only scoring"
+                        );
+                        // Extract priority from the body if possible
+                        let hints: Result<RoutingHints, _> = serde_json::from_slice(&req.body);
+                        let resolved = hints.ok().and_then(|h| {
+                            h.nvext.as_ref().and_then(|n| n.agent_hints.as_ref())
+                        });
+                        let priority = resolve_request_priority(
+                            resolved,
+                            priority_header.as_deref(),
+                            strict_priority_header.as_deref(),
+                        );
+                        (Vec::new(), priority.priority_jump, priority.strict_priority)
+                    }
+                    // For other errors (invalid body, upstream validation failures, etc.),
+                    // fail the pick as before
+                    _ => return Err(e.into_pick_error(&req.request_id)),
+                }
+            }
+        };
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -558,5 +610,57 @@ mod tests {
             guard.disarm();
         }
         assert!(!fired.load(Ordering::SeqCst));
+    }
+
+    /// Verifies that timeout and unavailable render errors map to the correct
+    /// PickError variants. The pick() method's fallback logic (lines 290-341)
+    /// catches these specific variants and degrades to load-only scoring instead
+    /// of failing the pick. Other render errors still fail the pick.
+    #[test]
+    fn tokenize_error_classification_for_degradation() {
+        use crate::vllm_render_client::VllmRenderError;
+        use reqwest::StatusCode;
+
+        // Timeout errors map to TokenizerTimeout (degradable in pick())
+        let timeout_err = TokenizeError::Render(VllmRenderError::Timeout {
+            timeout: Duration::from_secs(5),
+            source: reqwest::Error::builder(reqwest::error::ErrorKind::Request)
+                .url("http://renderer:8000/v1/chat/completions/render".parse().unwrap())
+                .build(),
+        });
+        assert!(matches!(
+            timeout_err.into_pick_error("test-req"),
+            PickError::TokenizerTimeout
+        ));
+
+        // Unavailable errors map to TokenizerUnavailable (degradable in pick())
+        let unavail_err = TokenizeError::Render(VllmRenderError::Unavailable {
+            source: reqwest::Error::builder(reqwest::error::ErrorKind::Request)
+                .url("http://renderer:8000/v1/chat/completions/render".parse().unwrap())
+                .build(),
+        });
+        assert!(matches!(
+            unavail_err.into_pick_error("test-req"),
+            PickError::TokenizerUnavailable
+        ));
+
+        // Invalid body errors are NOT degradable (still fail the pick)
+        let invalid_body_err = TokenizeError::InvalidBody(
+            serde_json::from_str::<serde_json::Value>("{invalid").unwrap_err(),
+        );
+        assert!(matches!(
+            invalid_body_err.into_pick_error("test-req"),
+            PickError::TokenizationFailed(_)
+        ));
+
+        // Upstream 500 errors are NOT degradable (still fail the pick)
+        let upstream_err = TokenizeError::Render(VllmRenderError::UpstreamStatus {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "internal error".to_string(),
+        });
+        assert!(matches!(
+            upstream_err.into_pick_error("test-req"),
+            PickError::TokenizerUpstreamError
+        ));
     }
 }
