@@ -501,20 +501,31 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     }
                 }
                 _ = &mut stopped => {
-                    // Mark as cancelled when context is stopped (client disconnect or timeout)
-                    inflight_guard.mark_error(ErrorType::Cancelled);
-                    // Token counts (input_tokens, output_tokens) are recorded on
-                    // the enclosing span by ResponseMetricCollector::Drop.
-                    tracing::warn!(
-                        request_id = %inflight_guard.request_id(),
-                        model = %inflight_guard.model(),
-                        endpoint = %inflight_guard.endpoint(),
-                        request_type = %inflight_guard.request_type(),
-                        error_type = "cancelled",
-                        elapsed_ms = %inflight_guard.elapsed_ms(),
-                        "request cancelled"
-                    );
-                    break;
+                    // Distinguish between graceful stop and kill.
+                    // On kill: terminate immediately (client disconnect, timeout).
+                    // On graceful stop: drain the source (bounded) and emit natural-end terminal events.
+                    if context.is_killed() {
+                        inflight_guard.mark_error(ErrorType::Cancelled);
+                        tracing::warn!(
+                            request_id = %inflight_guard.request_id(),
+                            model = %inflight_guard.model(),
+                            endpoint = %inflight_guard.endpoint(),
+                            request_type = %inflight_guard.request_type(),
+                            error_type = "cancelled",
+                            elapsed_ms = %inflight_guard.elapsed_ms(),
+                            "request killed"
+                        );
+                        break;
+                    } else {
+                        // Graceful stop: drain the source (bounded) and emit [DONE].
+                        tracing::debug!(
+                            request_id = %inflight_guard.request_id(),
+                            "graceful stop detected; draining source stream"
+                        );
+                        // Continue the loop to drain the source. The natural end (None) will
+                        // mark_ok() and emit [DONE]. If a kill() arrives during the drain or
+                        // the inactivity timeout fires, those arms will still break early.
+                    }
                 }
                 activity = async {
                     match activity_rx.as_mut() {
@@ -1158,5 +1169,253 @@ mod tests {
         assert!(!body.contains("site-packages"), "leaked a filesystem path");
         assert!(!body.contains("panicked at"), "leaked panic text");
         assert!(!body.contains("ValueError"), "leaked exception type");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Graceful stop vs kill behavior
+    //
+    // Issue #14248: monitor_for_disconnects drops [DONE] and terminal events when
+    // the request context is stopped (not killed) mid-stream. A graceful stop
+    // should drain the source (bounded) and emit natural-end [DONE]; kill should
+    // cut hard without draining.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Mock context that can be stopped or killed on demand.
+    #[derive(Debug)]
+    struct ControllableMockContext {
+        stopped: Arc<AtomicBool>,
+        killed: Arc<AtomicBool>,
+    }
+
+    impl ControllableMockContext {
+        fn new() -> Self {
+            Self {
+                stopped: Arc::new(AtomicBool::new(false)),
+                killed: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn trigger_stop(&self) {
+            self.stopped.store(true, Ordering::SeqCst);
+        }
+
+        fn trigger_kill(&self) {
+            self.killed.store(true, Ordering::SeqCst);
+            self.stopped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl dynamo_runtime::engine::AsyncEngineContext for ControllableMockContext {
+        fn id(&self) -> &str {
+            "controllable-test-ctx"
+        }
+        fn stop(&self) {}
+        fn stop_generating(&self) {
+            self.trigger_stop();
+        }
+        fn kill(&self) {
+            self.trigger_kill();
+        }
+        fn is_stopped(&self) -> bool {
+            self.stopped.load(Ordering::SeqCst)
+        }
+        fn is_killed(&self) -> bool {
+            self.killed.load(Ordering::SeqCst)
+        }
+        async fn stopped(&self) {
+            // Custom future that returns immediately once stopped, or never otherwise
+            std::future::poll_fn(|_cx| {
+                if self.stopped.load(Ordering::SeqCst) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            }).await
+        }
+        async fn killed(&self) {
+            std::future::poll_fn(|_cx| {
+                if self.killed.load(Ordering::SeqCst) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            }).await
+        }
+        fn link_child(&self, _: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {}
+    }
+
+    /// Build a stream that yields `token_count` events, with a configurable delay
+    /// between each token.
+    fn controllable_token_stream(
+        token_count: usize,
+        delay_ms: u64,
+    ) -> impl futures::Stream<Item = Result<axum::response::sse::Event, axum::Error>> {
+        async_stream::try_stream! {
+            for i in 0..token_count {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                yield axum::response::sse::Event::default().data(format!("token-{i}"));
+            }
+        }
+    }
+
+    /// Graceful stop mid-stream should drain the remaining source events and emit [DONE].
+    #[tokio::test]
+    async fn test_graceful_stop_drains_source_and_emits_done() {
+        let context = Arc::new(ControllableMockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            "graceful-stop-model",
+            Endpoint::ChatCompletions,
+            true,
+            "req-graceful",
+        );
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+
+        // Stream with 5 tokens, 10ms apart
+        let stream = controllable_token_stream(5, 10);
+        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout(stream, engine_context, guard, handle, None));
+
+        // Consume the first 2 tokens
+        assert!(monitored.next().await.is_some());
+        assert!(monitored.next().await.is_some());
+
+        // Trigger graceful stop
+        context.trigger_stop();
+        tokio::task::yield_now().await;
+
+        // The monitor should continue draining the remaining tokens (3, 4, 5) and then [DONE]
+        let body = collect_sse_body(monitored).await;
+
+        // Expect: token-2, token-3, token-4, [DONE]
+        assert!(body.contains("data: token-2"), "should drain token-2");
+        assert!(body.contains("data: token-3"), "should drain token-3");
+        assert!(body.contains("data: token-4"), "should drain token-4");
+        assert!(body.contains("data: [DONE]"), "graceful stop should emit [DONE]");
+
+        // Verify the request was marked OK, not cancelled
+        assert_eq!(
+            metrics.get_request_counter(
+                "graceful-stop-model",
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1,
+            "graceful stop followed by natural end should mark_ok()"
+        );
+    }
+
+    /// Kill mid-stream should cut immediately without draining or emitting [DONE].
+    #[tokio::test]
+    async fn test_kill_cuts_immediately_without_draining() {
+        let context = Arc::new(ControllableMockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            "kill-model",
+            Endpoint::ChatCompletions,
+            true,
+            "req-kill",
+        );
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+
+        // Stream with 5 tokens, 10ms apart
+        let stream = controllable_token_stream(5, 10);
+        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout(stream, engine_context, guard, handle, None));
+
+        // Consume the first 2 tokens
+        assert!(monitored.next().await.is_some());
+        assert!(monitored.next().await.is_some());
+
+        // Trigger kill
+        context.trigger_kill();
+        tokio::task::yield_now().await;
+
+        // The monitor should break immediately
+        let body = collect_sse_body(monitored).await;
+
+        // Expect: nothing more (no token-2, no [DONE])
+        assert!(!body.contains("data: token-2"), "kill should not drain token-2");
+        assert!(!body.contains("data: [DONE]"), "kill should not emit [DONE]");
+
+        // Verify the request was marked as cancelled
+        assert_eq!(
+            metrics.get_request_counter(
+                "kill-model",
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            1,
+            "kill should mark_error(Cancelled)"
+        );
+    }
+
+    /// Kill during a graceful stop drain should still cut immediately.
+    #[tokio::test]
+    async fn test_kill_during_graceful_stop_drain_cuts_immediately() {
+        let context = Arc::new(ControllableMockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            "kill-during-drain-model",
+            Endpoint::ChatCompletions,
+            true,
+            "req-kill-drain",
+        );
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+
+        // Stream with many tokens, slow delivery
+        let stream = controllable_token_stream(20, 20);
+        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout(stream, engine_context, guard, handle, None));
+
+        // Consume the first token
+        assert!(monitored.next().await.is_some());
+
+        // Trigger graceful stop — the monitor starts draining
+        context.trigger_stop();
+        tokio::task::yield_now().await;
+
+        // Consume a few more tokens during the drain
+        assert!(monitored.next().await.is_some());
+        assert!(monitored.next().await.is_some());
+
+        // Now trigger kill mid-drain
+        context.trigger_kill();
+        tokio::task::yield_now().await;
+
+        // The monitor should break immediately, no [DONE]
+        let body = collect_sse_body(monitored).await;
+
+        // We should NOT see all 20 tokens or [DONE]
+        let token_count = (0..20).filter(|i| body.contains(&format!("data: token-{i}"))).count();
+        assert!(
+            token_count < 17,
+            "kill during drain should cut immediately, not drain all tokens; got {token_count}"
+        );
+        assert!(
+            !body.contains("data: [DONE]"),
+            "kill should not emit [DONE]"
+        );
+
+        // Verify the request was marked as cancelled
+        assert_eq!(
+            metrics.get_request_counter(
+                "kill-during-drain-model",
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            1,
+            "kill during drain should mark_error(Cancelled)"
+        );
     }
 }
