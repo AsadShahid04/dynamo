@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dynamo_kv_router::protocols::{ActiveLoad, DpRank};
 use dynamo_runtime::component::Endpoint;
@@ -17,29 +17,21 @@ struct WorkerMetrics {
     kv_used_blocks: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct MetricsState {
-    /// Per-rank metrics. Each rank maintains its own metrics.
-    ///
-    /// Under attention-DP configurations (e.g., TensorRT-LLM reporting multiple
-    /// ranks from one process), this map ensures metrics from all ranks are
-    /// preserved when published within the debounce window.
-    metrics: HashMap<DpRank, WorkerMetrics>,
-    /// Ranks that have been updated since the last publish.
-    ///
-    /// Dirty tracking ensures all modified ranks are flushed when the debounce
-    /// timer fires, preventing rank coalescing that would drop metrics.
-    dirty_ranks: HashSet<DpRank>,
-}
+/// Per-rank metrics stored in the watch channel.
+///
+/// Under attention-DP configurations (e.g., TensorRT-LLM reporting multiple
+/// ranks from one process), this map ensures metrics from all ranks are
+/// preserved when published within the debounce window.
+type MetricsMap = HashMap<DpRank, WorkerMetrics>;
 
 pub struct WorkerMetricsPublisher {
-    tx: tokio::sync::watch::Sender<MetricsState>,
-    rx: tokio::sync::watch::Receiver<MetricsState>,
+    tx: tokio::sync::watch::Sender<MetricsMap>,
+    rx: tokio::sync::watch::Receiver<MetricsMap>,
 }
 
 impl WorkerMetricsPublisher {
     pub fn new() -> Result<Self> {
-        let (tx, rx) = tokio::sync::watch::channel(MetricsState::default());
+        let (tx, rx) = tokio::sync::watch::channel(MetricsMap::default());
         Ok(Self { tx, rx })
     }
 
@@ -64,12 +56,11 @@ impl WorkerMetricsPublisher {
             metrics.active_decode_blocks,
             metrics.kv_used_blocks
         );
-        
-        self.tx.send_modify(|state| {
-            state.metrics.insert(rank, metrics);
-            state.dirty_ranks.insert(rank);
+
+        self.tx.send_modify(|map| {
+            map.insert(rank, metrics);
         });
-        
+
         Ok(())
     }
 
@@ -84,66 +75,80 @@ impl WorkerMetricsPublisher {
         let metrics_rx = self.rx.clone();
 
         tokio::spawn(async move {
-            let mut rx = metrics_rx;
-            let mut last_state = MetricsState::default();
-            let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
-            tokio::pin!(publish_timer);
+            Self::run_publishing_loop(metrics_rx, worker_id, move |load| {
+                let publisher = event_publisher.clone();
+                Box::pin(async move {
+                    if let Err(e) = publisher.publish(&load).await {
+                        tracing::warn!(
+                            "Failed to publish metrics for rank {}: {}",
+                            load.dp_rank,
+                            e
+                        );
+                    }
+                })
+            })
+            .await;
+        });
+    }
 
-            loop {
-                tokio::select! {
-                    result = rx.changed() => {
-                        if result.is_err() {
-                            tracing::debug!(
-                                "Metrics publisher sender dropped, stopping event-plane background task"
-                            );
-                            break;
-                        }
+    async fn run_publishing_loop<F, Fut>(
+        mut rx: tokio::sync::watch::Receiver<MetricsMap>,
+        worker_id: u64,
+        mut publish_fn: F,
+    ) where
+        F: FnMut(ActiveLoad) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let mut last_metrics = MetricsMap::default();
+        let mut pending: HashMap<DpRank, WorkerMetrics> = HashMap::new();
+        let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
+        tokio::pin!(publish_timer);
 
-                        let state = rx.borrow_and_update().clone();
-                        
-                        // Check if any ranks have changed
-                        let mut has_changes = false;
-                        for &rank in &state.dirty_ranks {
-                            if state.metrics.get(&rank) != last_state.metrics.get(&rank) {
-                                has_changes = true;
-                                break;
-                            }
-                        }
-                        
-                        if !has_changes {
-                            continue;
-                        }
+        loop {
+            tokio::select! {
+                result = rx.changed() => {
+                    if result.is_err() {
+                        tracing::debug!(
+                            "Metrics publisher sender dropped, stopping event-plane background task"
+                        );
+                        break;
+                    }
 
-                        last_state = state;
+                    let current_metrics = rx.borrow_and_update().clone();
+
+                    // Diff against last_metrics to find changed ranks
+                    let mut any_changed = false;
+                    for (rank, metrics) in &current_metrics {
+                        if last_metrics.get(rank) != Some(metrics) {
+                            pending.insert(*rank, metrics.clone());
+                            last_metrics.insert(*rank, metrics.clone());
+                            any_changed = true;
+                        }
+                    }
+
+                    if any_changed {
                         publish_timer.as_mut().reset(
                             tokio::time::Instant::now()
                                 + tokio::time::Duration::from_millis(1)
                         );
                     }
-                    _ = &mut publish_timer, if !last_state.dirty_ranks.is_empty() => {
-                        // Publish all dirty ranks
-                        for &rank in &last_state.dirty_ranks {
-                            if let Some(metrics) = last_state.metrics.get(&rank) {
-                                let active_load = ActiveLoad {
-                                    worker_id,
-                                    dp_rank: rank,
-                                    active_decode_blocks: metrics.active_decode_blocks,
-                                    active_prefill_tokens: None,
-                                    kv_used_blocks: metrics.kv_used_blocks,
-                                };
+                }
+                _ = &mut publish_timer, if !pending.is_empty() => {
+                    // Publish all pending ranks
+                    for (rank, metrics) in pending.drain() {
+                        let active_load = ActiveLoad {
+                            worker_id,
+                            dp_rank: rank,
+                            active_decode_blocks: metrics.active_decode_blocks,
+                            active_prefill_tokens: None,
+                            kv_used_blocks: metrics.kv_used_blocks,
+                        };
 
-                                if let Err(e) = event_publisher.publish(&active_load).await {
-                                    tracing::warn!("Failed to publish metrics for rank {}: {}", rank, e);
-                                }
-                            }
-                        }
-                        
-                        // Clear dirty ranks after publishing
-                        last_state.dirty_ranks.clear();
+                        publish_fn(active_load).await;
                     }
                 }
             }
-        });
+        }
     }
 }
 
@@ -153,155 +158,171 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    /// Mock event publisher that records published ActiveLoad events
-    struct MockEventPublisher {
-        published: Arc<Mutex<Vec<ActiveLoad>>>,
-    }
-
-    impl MockEventPublisher {
-        fn new() -> (Self, Arc<Mutex<Vec<ActiveLoad>>>) {
-            let published = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    published: published.clone(),
-                },
-                published,
-            )
-        }
-
-        async fn publish(&self, load: &ActiveLoad) -> Result<()> {
-            self.published.lock().await.push(load.clone());
-            Ok(())
-        }
-    }
-
-    /// Helper to create a mock EventPublisher compatible with start_metrics_publishing
-    fn create_mock_publisher() -> (EventPublisher, Arc<Mutex<Vec<ActiveLoad>>>) {
-        // Create a mock that collects published events
-        let published = Arc::new(Mutex::new(Vec::new()));
-        let published_clone = published.clone();
-        
-        // We need to create a real EventPublisher for testing
-        // Since we can't easily mock EventPublisher, we'll test the publish logic directly
-        // by inspecting the watch channel state
-        unimplemented!("EventPublisher mocking requires runtime setup")
-    }
-
     #[tokio::test]
     async fn test_single_rank_publish() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
-        
-        // Publish metrics for rank 0
+
         publisher.publish(Some(0), Some(100), Some(50)).unwrap();
-        
-        // Verify state was updated
-        let state = publisher.rx.borrow().clone();
-        assert_eq!(state.metrics.len(), 1);
-        assert_eq!(state.dirty_ranks.len(), 1);
-        assert!(state.dirty_ranks.contains(&0));
-        
-        let metrics = state.metrics.get(&0).unwrap();
+
+        let map = publisher.rx.borrow().clone();
+        assert_eq!(map.len(), 1);
+
+        let metrics = map.get(&0).unwrap();
         assert_eq!(metrics.active_decode_blocks, Some(100));
         assert_eq!(metrics.kv_used_blocks, Some(50));
     }
 
     #[tokio::test]
-    async fn test_multi_rank_publish_within_debounce_window() {
+    async fn test_multi_rank_debounce_flush() {
+        tokio::time::pause();
+
         let publisher = WorkerMetricsPublisher::new().unwrap();
-        
-        // Publish metrics for multiple ranks in quick succession (simulating attention-DP)
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let published_clone = published.clone();
+
+        let rx = publisher.rx.clone();
+
+        tokio::spawn(async move {
+            WorkerMetricsPublisher::run_publishing_loop(
+                rx,
+                123, // worker_id
+                move |load: ActiveLoad| {
+                    let pub_clone = published_clone.clone();
+                    Box::pin(async move {
+                        pub_clone.lock().await.push(load);
+                    })
+                },
+            )
+            .await;
+        });
+
+        // Publish multiple ranks back-to-back (within debounce window)
         publisher.publish(Some(0), Some(100), Some(50)).unwrap();
         publisher.publish(Some(1), Some(200), Some(75)).unwrap();
         publisher.publish(Some(2), Some(150), Some(60)).unwrap();
-        
-        // Verify all ranks are preserved in the state
-        let state = publisher.rx.borrow().clone();
-        assert_eq!(state.metrics.len(), 3, "All three ranks should be stored");
-        assert_eq!(state.dirty_ranks.len(), 3, "All three ranks should be dirty");
-        
-        // Verify rank 0 metrics
-        assert!(state.dirty_ranks.contains(&0));
-        let metrics0 = state.metrics.get(&0).unwrap();
-        assert_eq!(metrics0.active_decode_blocks, Some(100));
-        assert_eq!(metrics0.kv_used_blocks, Some(50));
-        
-        // Verify rank 1 metrics
-        assert!(state.dirty_ranks.contains(&1));
-        let metrics1 = state.metrics.get(&1).unwrap();
-        assert_eq!(metrics1.active_decode_blocks, Some(200));
-        assert_eq!(metrics1.kv_used_blocks, Some(75));
-        
-        // Verify rank 2 metrics
-        assert!(state.dirty_ranks.contains(&2));
-        let metrics2 = state.metrics.get(&2).unwrap();
-        assert_eq!(metrics2.active_decode_blocks, Some(150));
-        assert_eq!(metrics2.kv_used_blocks, Some(60));
+
+        // Give rx.changed() time to trigger
+        tokio::time::advance(tokio::time::Duration::from_micros(100)).await;
+
+        // Advance past debounce window (1ms)
+        tokio::time::advance(tokio::time::Duration::from_millis(2)).await;
+
+        // All three ranks should have been published
+        let events = published.lock().await;
+        assert_eq!(
+            events.len(),
+            3,
+            "Expected 3 published events, got {}",
+            events.len()
+        );
+
+        // Verify rank 0
+        let event0 = events.iter().find(|e| e.dp_rank == 0).unwrap();
+        assert_eq!(event0.worker_id, 123);
+        assert_eq!(event0.active_decode_blocks, Some(100));
+        assert_eq!(event0.kv_used_blocks, Some(50));
+
+        // Verify rank 1
+        let event1 = events.iter().find(|e| e.dp_rank == 1).unwrap();
+        assert_eq!(event1.worker_id, 123);
+        assert_eq!(event1.active_decode_blocks, Some(200));
+        assert_eq!(event1.kv_used_blocks, Some(75));
+
+        // Verify rank 2
+        let event2 = events.iter().find(|e| e.dp_rank == 2).unwrap();
+        assert_eq!(event2.worker_id, 123);
+        assert_eq!(event2.active_decode_blocks, Some(150));
+        assert_eq!(event2.kv_used_blocks, Some(60));
     }
 
     #[tokio::test]
-    async fn test_rank_update_marks_dirty() {
+    async fn test_single_rank_update_only_publishes_that_rank() {
+        tokio::time::pause();
+
         let publisher = WorkerMetricsPublisher::new().unwrap();
-        
-        // Initial publish for rank 0
-        publisher.publish(Some(0), Some(100), Some(50)).unwrap();
-        let state1 = publisher.rx.borrow().clone();
-        assert_eq!(state1.dirty_ranks.len(), 1);
-        
-        // Manually clear dirty ranks (simulating a publish cycle)
-        publisher.tx.send_modify(|state| {
-            state.dirty_ranks.clear();
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let published_clone = published.clone();
+
+        let rx = publisher.rx.clone();
+
+        tokio::spawn(async move {
+            WorkerMetricsPublisher::run_publishing_loop(rx, 456, move |load: ActiveLoad| {
+                let pub_clone = published_clone.clone();
+                Box::pin(async move {
+                    pub_clone.lock().await.push(load);
+                })
+            })
+            .await;
         });
-        
-        let state2 = publisher.rx.borrow().clone();
-        assert_eq!(state2.dirty_ranks.len(), 0);
-        
-        // Update the same rank with new metrics
-        publisher.publish(Some(0), Some(120), Some(55)).unwrap();
-        
-        // Verify rank is marked dirty again
-        let state3 = publisher.rx.borrow().clone();
-        assert_eq!(state3.dirty_ranks.len(), 1);
-        assert!(state3.dirty_ranks.contains(&0));
-        
-        let metrics = state3.metrics.get(&0).unwrap();
-        assert_eq!(metrics.active_decode_blocks, Some(120));
-        assert_eq!(metrics.kv_used_blocks, Some(55));
+
+        // Initial publish of three ranks
+        publisher.publish(Some(0), Some(100), Some(50)).unwrap();
+        publisher.publish(Some(1), Some(200), Some(75)).unwrap();
+        publisher.publish(Some(2), Some(150), Some(60)).unwrap();
+
+        tokio::time::advance(tokio::time::Duration::from_micros(100)).await;
+        tokio::time::advance(tokio::time::Duration::from_millis(2)).await;
+
+        {
+            let events = published.lock().await;
+            assert_eq!(events.len(), 3, "Initial flush should publish 3 ranks");
+        }
+
+        // Clear published events
+        published.lock().await.clear();
+
+        // Update only rank 1
+        publisher.publish(Some(1), Some(250), Some(80)).unwrap();
+
+        tokio::time::advance(tokio::time::Duration::from_micros(100)).await;
+        tokio::time::advance(tokio::time::Duration::from_millis(2)).await;
+
+        // Only rank 1 should be published
+        let events = published.lock().await;
+        assert_eq!(
+            events.len(),
+            1,
+            "Only the updated rank should be published, got {}",
+            events.len()
+        );
+        assert_eq!(events[0].dp_rank, 1);
+        assert_eq!(events[0].active_decode_blocks, Some(250));
+        assert_eq!(events[0].kv_used_blocks, Some(80));
     }
 
     #[tokio::test]
     async fn test_default_rank_zero() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
-        
-        // Publish without specifying rank (should default to 0)
+
         publisher.publish(None, Some(100), Some(50)).unwrap();
-        
-        let state = publisher.rx.borrow().clone();
-        assert_eq!(state.metrics.len(), 1);
-        assert!(state.metrics.contains_key(&0));
-        assert!(state.dirty_ranks.contains(&0));
+
+        let map = publisher.rx.borrow().clone();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&0));
     }
 
     #[tokio::test]
     async fn test_publish_requires_at_least_one_metric() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
-        
-        // Publishing without any metrics should fail
+
         let result = publisher.publish(Some(0), None, None);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("at least one load metric"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("at least one load metric")
+        );
     }
 
     #[tokio::test]
     async fn test_publish_with_only_active_decode_blocks() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
-        
+
         publisher.publish(Some(0), Some(100), None).unwrap();
-        
-        let state = publisher.rx.borrow().clone();
-        let metrics = state.metrics.get(&0).unwrap();
+
+        let map = publisher.rx.borrow().clone();
+        let metrics = map.get(&0).unwrap();
         assert_eq!(metrics.active_decode_blocks, Some(100));
         assert_eq!(metrics.kv_used_blocks, None);
     }
@@ -309,46 +330,12 @@ mod tests {
     #[tokio::test]
     async fn test_publish_with_only_kv_used_blocks() {
         let publisher = WorkerMetricsPublisher::new().unwrap();
-        
+
         publisher.publish(Some(0), None, Some(50)).unwrap();
-        
-        let state = publisher.rx.borrow().clone();
-        let metrics = state.metrics.get(&0).unwrap();
+
+        let map = publisher.rx.borrow().clone();
+        let metrics = map.get(&0).unwrap();
         assert_eq!(metrics.active_decode_blocks, None);
         assert_eq!(metrics.kv_used_blocks, Some(50));
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_rank_publishes() {
-        let publisher = Arc::new(WorkerMetricsPublisher::new().unwrap());
-        
-        // Simulate concurrent publishes from different ranks
-        let handles: Vec<_> = (0..10)
-            .map(|rank| {
-                let p = publisher.clone();
-                tokio::spawn(async move {
-                    p.publish(Some(rank), Some(rank as u64 * 10), Some(rank as u64 * 5))
-                        .unwrap();
-                })
-            })
-            .collect();
-        
-        // Wait for all publishes
-        for handle in handles {
-            handle.await.unwrap();
-        }
-        
-        // Verify all ranks are present
-        let state = publisher.rx.borrow().clone();
-        assert_eq!(state.metrics.len(), 10, "All 10 ranks should be stored");
-        assert_eq!(state.dirty_ranks.len(), 10, "All 10 ranks should be dirty");
-        
-        for rank in 0..10 {
-            assert!(state.metrics.contains_key(&rank));
-            assert!(state.dirty_ranks.contains(&rank));
-            let metrics = state.metrics.get(&rank).unwrap();
-            assert_eq!(metrics.active_decode_blocks, Some(rank as u64 * 10));
-            assert_eq!(metrics.kv_used_blocks, Some(rank as u64 * 5));
-        }
     }
 }
