@@ -73,6 +73,7 @@ impl WorkerMetricsPublisher {
 
     pub(super) fn start_metrics_publishing(&self, event_publisher: EventPublisher, worker_id: u64) {
         let metrics_rx = self.rx.clone();
+        let event_publisher = std::sync::Arc::new(event_publisher);
 
         tokio::spawn(async move {
             Self::run_publishing_loop(metrics_rx, worker_id, move |load| {
@@ -201,11 +202,20 @@ mod tests {
         publisher.publish(Some(1), Some(200), Some(75)).unwrap();
         publisher.publish(Some(2), Some(150), Some(60)).unwrap();
 
-        // Give rx.changed() time to trigger
-        tokio::time::advance(tokio::time::Duration::from_micros(100)).await;
+        // Give rx.changed() time to trigger and the select loop to process
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
 
         // Advance past debounce window (1ms)
         tokio::time::advance(tokio::time::Duration::from_millis(2)).await;
+
+        // Give the publishing task time to execute
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
 
         // All three ranks should have been published
         let events = published.lock().await;
@@ -260,8 +270,15 @@ mod tests {
         publisher.publish(Some(1), Some(200), Some(75)).unwrap();
         publisher.publish(Some(2), Some(150), Some(60)).unwrap();
 
-        tokio::time::advance(tokio::time::Duration::from_micros(100)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
         tokio::time::advance(tokio::time::Duration::from_millis(2)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
 
         {
             let events = published.lock().await;
@@ -274,8 +291,15 @@ mod tests {
         // Update only rank 1
         publisher.publish(Some(1), Some(250), Some(80)).unwrap();
 
-        tokio::time::advance(tokio::time::Duration::from_micros(100)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
         tokio::time::advance(tokio::time::Duration::from_millis(2)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
 
         // Only rank 1 should be published
         let events = published.lock().await;
