@@ -242,6 +242,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         );
 
         // Map backend finish reasons to OpenAI's finish reasons.
+        let backend_finish_reason_str = delta
+            .finish_reason
+            .as_ref()
+            .map(|reason| reason.to_string());
         let finish_reason = match delta.finish_reason {
             Some(common::FinishReason::EoS) => Some(dynamo_protocols::types::FinishReason::Stop),
             Some(common::FinishReason::Stop) => Some(dynamo_protocols::types::FinishReason::Stop),
@@ -285,6 +289,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             stop_reason,
             Some(completion_token_ids_slice),
             prompt_logprobs_payload,
+            backend_finish_reason_str.as_deref(),
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
@@ -305,6 +310,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 tracing::debug!(
                     "Injected completion_token_ids into chat completion nvext: {} tokens",
                     tokens.len()
+                );
+            }
+            if let Some(ref backend_reason) = nvext_response.backend_finish_reason {
+                tracing::debug!(
+                    "Injected backend_finish_reason into chat completion nvext: {}",
+                    backend_reason
                 );
             }
         }
