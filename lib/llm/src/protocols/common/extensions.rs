@@ -674,6 +674,12 @@ pub struct NvExtResponse {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_logprobs: Option<PromptLogprobs>,
+
+    /// Raw backend finish reason before normalization to OpenAI values.
+    /// Enables distinguishing backend-specific termination states (e.g. "abort")
+    /// that map to the same OpenAI finish_reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_finish_reason: Option<String>,
 }
 
 pub(crate) fn merge_response_nvext(
@@ -725,6 +731,7 @@ pub struct NvExtResponseFieldSelection {
     pub completion_token_ids: bool,
     pub prompt_token_ids: bool,
     pub prompt_logprobs: bool,
+    pub backend_finish_reason: bool,
 }
 
 impl NvExtResponseFieldSelection {
@@ -745,6 +752,7 @@ impl NvExtResponseFieldSelection {
                     "completion_token_ids" => selection.completion_token_ids = true,
                     "prompt_token_ids" => selection.prompt_token_ids = true,
                     "prompt_logprobs" => selection.prompt_logprobs = true,
+                    "backend_finish_reason" => selection.backend_finish_reason = true,
                     _ => {}
                 }
             }
@@ -765,6 +773,7 @@ impl NvExtResponseFieldSelection {
         stop_reason_from_backend: Option<StopReason>,
         completion_token_ids_from_backend: Option<&[TokenIdType]>,
         prompt_logprobs_from_backend: Option<PromptLogprobs>,
+        backend_finish_reason: Option<&str>,
     ) -> Option<NvExtResponse> {
         let worker_id = if self.worker_id {
             tracker.and_then(|t| t.get_worker_info())
@@ -825,6 +834,12 @@ impl NvExtResponseFieldSelection {
             None
         };
 
+        let backend_finish_reason = if self.backend_finish_reason && finish_reason_present {
+            backend_finish_reason.map(|s| s.to_string())
+        } else {
+            None
+        };
+
         if worker_id.is_none()
             && token_ids.is_none()
             && routed_experts.is_none()
@@ -834,6 +849,7 @@ impl NvExtResponseFieldSelection {
             && completion_token_ids.is_none()
             && prompt_token_ids.is_none()
             && prompt_logprobs.is_none()
+            && backend_finish_reason.is_none()
         {
             return None;
         }
@@ -848,6 +864,7 @@ impl NvExtResponseFieldSelection {
             completion_token_ids,
             prompt_token_ids,
             prompt_logprobs,
+            backend_finish_reason,
         })
     }
 }

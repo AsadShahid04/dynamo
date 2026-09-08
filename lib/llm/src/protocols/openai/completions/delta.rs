@@ -208,6 +208,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // Backend errors are response errors, not successful OpenAI stop reasons.
         // Keep completions aligned with the chat-completions delta generator.
+        let backend_finish_reason_str = delta
+            .finish_reason
+            .as_ref()
+            .map(|reason| reason.to_string());
         let finish_reason = match delta.finish_reason {
             Some(common::FinishReason::Error(err_msg)) => {
                 self.state.tracker_ref().record_finish();
@@ -241,6 +245,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             stop_reason,
             completion_token_ids_for_nvext.as_deref(),
             prompt_logprobs_payload,
+            backend_finish_reason_str.as_deref(),
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             response.nvext = Some(nvext_json);
@@ -261,6 +266,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                 tracing::debug!(
                     "Injected completion_token_ids into completions nvext: {} tokens",
                     tokens.len()
+                );
+            }
+            if let Some(ref backend_reason) = nvext_response.backend_finish_reason {
+                tracing::debug!(
+                    "Injected backend_finish_reason into completions nvext: {}",
+                    backend_reason
                 );
             }
         }
@@ -787,6 +798,119 @@ mod tests {
             assert!(
                 nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
                 "engine_data should not appear when backend provides None"
+            );
+        }
+    }
+
+    #[test]
+    fn test_backend_finish_reason_abort_is_exposed() {
+        // Test that backend abort reason is exposed in nvext while finish_reason remains stop
+        let request = create_test_request_with_extra_fields(vec![
+            "backend_finish_reason".to_string(),
+        ]);
+        let mut generator = request.response_generator("req-abort".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.finish_reason = Some(common::FinishReason::Cancelled);
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        // OpenAI finish_reason should be "stop" (normalized)
+        assert_eq!(
+            response.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
+        );
+
+        // nvext.backend_finish_reason should preserve the original "cancelled"
+        let nvext = response.nvext.expect("nvext should be present");
+        assert_eq!(
+            nvext.get("backend_finish_reason"),
+            Some(&serde_json::json!("cancelled")),
+            "backend_finish_reason should expose the original cancelled reason"
+        );
+    }
+
+    #[test]
+    fn test_backend_finish_reason_stop_not_falsely_abort() {
+        // Test that normal stop does not falsely set abort
+        let request = create_test_request_with_extra_fields(vec![
+            "backend_finish_reason".to_string(),
+        ]);
+        let mut generator = request.response_generator("req-stop".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.finish_reason = Some(common::FinishReason::Stop);
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        // OpenAI finish_reason should be "stop"
+        assert_eq!(
+            response.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
+        );
+
+        // nvext.backend_finish_reason should show "stop", not "abort"
+        let nvext = response.nvext.expect("nvext should be present");
+        assert_eq!(
+            nvext.get("backend_finish_reason"),
+            Some(&serde_json::json!("stop")),
+            "backend_finish_reason should be stop, not abort"
+        );
+    }
+
+    #[test]
+    fn test_backend_finish_reason_not_exposed_without_opt_in() {
+        // Test that backend_finish_reason is not included unless explicitly requested
+        let request = create_test_request(); // No extra_fields
+        let mut generator = request.response_generator("req-no-opt-in".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.finish_reason = Some(common::FinishReason::Cancelled);
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        // nvext should be None since no fields were requested
+        assert!(
+            response.nvext.is_none(),
+            "nvext should be None when no fields are requested"
+        );
+    }
+
+    #[test]
+    fn test_other_finish_reasons_exposed() {
+        // Test that other finish reasons like length and eos are also exposed
+        let test_cases = vec![
+            (common::FinishReason::Length, "length"),
+            (common::FinishReason::EoS, "eos"),
+            (common::FinishReason::ContentFilter, "content_filter"),
+        ];
+
+        for (backend_reason, expected_str) in test_cases {
+            let request = create_test_request_with_extra_fields(vec![
+                "backend_finish_reason".to_string(),
+            ]);
+            let mut generator = request.response_generator("req-other".to_string());
+
+            let mut backend_output = final_backend_output();
+            backend_output.finish_reason = Some(backend_reason.clone());
+
+            let response = generator
+                .choice_from_postprocessor(backend_output)
+                .expect("choice generation");
+
+            let nvext = response.nvext.expect("nvext should be present");
+            assert_eq!(
+                nvext.get("backend_finish_reason"),
+                Some(&serde_json::json!(expected_str)),
+                "backend_finish_reason should be {} for {:?}",
+                expected_str,
+                backend_reason
             );
         }
     }

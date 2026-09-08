@@ -350,6 +350,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_backend_finish_reason_survives_aggregation() {
+        // Test that backend_finish_reason in nvext survives aggregation
+        let delta1 = create_test_delta(0, "Hello", None, None);
+        
+        let delta2 = create_test_delta(0, " world", None, None);
+        
+        let mut delta3 = create_test_delta(0, "!", Some("cancelled".to_string()), None);
+        // Add nvext with backend_finish_reason
+        delta3.data.as_mut().unwrap().nvext = Some(serde_json::json!({
+            "backend_finish_reason": "cancelled"
+        }));
+
+        let deltas = vec![delta1, delta2, delta3];
+        let stream = Box::pin(stream::iter(deltas));
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregation should succeed");
+
+        // Check that finish_reason is normalized to stop (Cancelled maps to Stop)
+        assert_eq!(
+            result.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::CompletionFinishReason::Stop)
+        );
+
+        // Check that nvext.backend_finish_reason is preserved
+        let nvext = result.nvext.expect("nvext should be present after aggregation");
+        assert_eq!(
+            nvext.get("backend_finish_reason"),
+            Some(&serde_json::json!("cancelled")),
+            "backend_finish_reason should survive aggregation"
+        );
+    }
+
+    #[tokio::test]
     async fn test_multiple_deltas_merge_nvext_fields() {
         let mut annotated_delta1 = create_test_delta(0, "Hello,", None, None);
         annotated_delta1.data.as_mut().expect("delta data").nvext =
