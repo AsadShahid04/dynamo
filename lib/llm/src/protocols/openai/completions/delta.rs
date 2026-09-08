@@ -805,9 +805,8 @@ mod tests {
     #[test]
     fn test_backend_finish_reason_abort_is_exposed() {
         // Test that backend abort reason is exposed in nvext while finish_reason remains stop
-        let request = create_test_request_with_extra_fields(vec![
-            "backend_finish_reason".to_string(),
-        ]);
+        let request =
+            create_test_request_with_extra_fields(vec!["backend_finish_reason".to_string()]);
         let mut generator = request.response_generator("req-abort".to_string());
 
         let mut backend_output = final_backend_output();
@@ -835,9 +834,8 @@ mod tests {
     #[test]
     fn test_backend_finish_reason_stop_not_falsely_abort() {
         // Test that normal stop does not falsely set abort
-        let request = create_test_request_with_extra_fields(vec![
-            "backend_finish_reason".to_string(),
-        ]);
+        let request =
+            create_test_request_with_extra_fields(vec!["backend_finish_reason".to_string()]);
         let mut generator = request.response_generator("req-stop".to_string());
 
         let mut backend_output = final_backend_output();
@@ -892,9 +890,8 @@ mod tests {
         ];
 
         for (backend_reason, expected_str) in test_cases {
-            let request = create_test_request_with_extra_fields(vec![
-                "backend_finish_reason".to_string(),
-            ]);
+            let request =
+                create_test_request_with_extra_fields(vec!["backend_finish_reason".to_string()]);
             let mut generator = request.response_generator("req-other".to_string());
 
             let mut backend_output = final_backend_output();

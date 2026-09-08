@@ -1734,7 +1734,7 @@ mod tests {
     fn build_response_nvext_all_false_returns_none() {
         assert!(
             NvExtResponseFieldSelection::default()
-                .build_response_nvext(None, false, None, None, None, None)
+                .build_response_nvext(None, false, None, None, None, None, None)
                 .is_none()
         );
     }
@@ -1748,7 +1748,7 @@ mod tests {
         let tracker = tracker_with_prefill_worker();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None, None)
             .expect("worker_id should emit regardless of finish_reason");
 
         assert!(out.worker_id.is_some());
@@ -1766,7 +1766,7 @@ mod tests {
         let tracker = tracker_with_forwarded_worker_info();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None, None)
             .expect("forwarded worker_id should surface in nvext");
 
         assert_eq!(
@@ -1790,12 +1790,12 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .build_response_nvext(Some(&tracker), false, None, None, None, None, None)
                 .is_none()
         );
 
         let out = selection
-            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .build_response_nvext(Some(&tracker), true, None, None, None, None, None)
             .expect("timing should emit on finish");
         assert!(out.timing.is_some());
     }
@@ -1809,7 +1809,7 @@ mod tests {
         let tracker = tracker_with_query_token_ids();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(Some(&tracker), false, None, None, None, None, None)
             .expect("token_ids should emit when present");
 
         assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
@@ -1824,7 +1824,7 @@ mod tests {
         let engine_data = serde_json::json!({ "routed_experts": {"layer_0": [1, 3]} });
 
         let out = selection
-            .build_response_nvext(None, false, Some(engine_data), None, None, None)
+            .build_response_nvext(None, false, Some(engine_data), None, None, None, None)
             .expect("routed_experts should emit when present");
 
         assert_eq!(
@@ -1841,7 +1841,15 @@ mod tests {
         };
 
         let out = selection
-            .build_response_nvext(None, false, None, None, Some(&[101u32, 102, 103]), None)
+            .build_response_nvext(
+                None,
+                false,
+                None,
+                None,
+                Some(&[101u32, 102, 103]),
+                None,
+                None,
+            )
             .expect("completion_token_ids should emit when requested and present");
 
         assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
@@ -1858,12 +1866,12 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .build_response_nvext(Some(&tracker), false, None, None, None, None, None)
                 .is_none()
         );
 
         let out = selection
-            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .build_response_nvext(Some(&tracker), true, None, None, None, None, None)
             .expect("prompt_token_ids should emit on the final chunk");
         assert_eq!(out.prompt_token_ids, Some(vec![101u32, 102, 103]));
     }
@@ -1887,12 +1895,12 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(None, false, None, None, None, Some(payload.clone()))
+                .build_response_nvext(None, false, None, None, None, Some(payload.clone()), None)
                 .is_none()
         );
 
         let out = selection
-            .build_response_nvext(None, true, None, None, None, Some(payload))
+            .build_response_nvext(None, true, None, None, None, Some(payload), None)
             .expect("prompt_logprobs should emit on the final chunk");
         let got = out.prompt_logprobs.expect("prompt_logprobs payload");
         assert_eq!(got.len(), 2);

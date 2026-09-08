@@ -353,9 +353,9 @@ mod tests {
     async fn test_backend_finish_reason_survives_aggregation() {
         // Test that backend_finish_reason in nvext survives aggregation
         let delta1 = create_test_delta(0, "Hello", None, None);
-        
+
         let delta2 = create_test_delta(0, " world", None, None);
-        
+
         let mut delta3 = create_test_delta(0, "!", Some("cancelled".to_string()), None);
         // Add nvext with backend_finish_reason
         delta3.data.as_mut().unwrap().nvext = Some(serde_json::json!({
@@ -375,7 +375,9 @@ mod tests {
         );
 
         // Check that nvext.backend_finish_reason is preserved
-        let nvext = result.nvext.expect("nvext should be present after aggregation");
+        let nvext = result
+            .nvext
+            .expect("nvext should be present after aggregation");
         assert_eq!(
             nvext.get("backend_finish_reason"),
             Some(&serde_json::json!("cancelled")),
