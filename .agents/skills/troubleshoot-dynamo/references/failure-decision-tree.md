@@ -104,6 +104,7 @@ Signals:
 - manifest applied but no pods appear
 - `DynamoGraphDeployment` has reconcile errors
 - CRD is missing
+- restart stuck in `Restarting` phase
 
 Checks:
 
@@ -111,9 +112,12 @@ Checks:
 kubectl get dynamographdeployment -n "${NAMESPACE}"
 kubectl describe dynamographdeployment <name> -n "${NAMESPACE}"
 kubectl get crd | grep -i dynamo
+kubectl get dynamographdeployment <name> -n "${NAMESPACE}" -o jsonpath='{.status.restart}'
 ```
 
 Next action: install/fix Dynamo Kubernetes Platform or repair invalid DGD YAML.
+For restart operations and troubleshooting stuck restarts, see the
+[Restart a DGD guide](https://docs.nvidia.com/dynamo/kubernetes-deployment/operations/restart-a-dgd).
 
 ## Frontend Or Router
 
