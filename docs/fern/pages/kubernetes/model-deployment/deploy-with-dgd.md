@@ -742,6 +742,9 @@ These are independent capabilities you opt into per workload. None are required 
   <Card title="Customize Health Probes" icon="regular heart-pulse" href="../operations/observability.mdx#check-and-customize-health-probes">
     Override the operator's default liveness, readiness, and startup probes when needed.
   </Card>
+  <Card title="Restart a DGD" icon="regular rotate-right" href="../operations/restart-a-dgd.md">
+    Trigger a graph-level restart of an existing deployment after config changes or failures.
+  </Card>
   <Card title="Observability and Metrics" icon="regular chart-line" href="../operations/observability.mdx">
     Scrape Prometheus metrics — on by default; opt out with an annotation.
   </Card>

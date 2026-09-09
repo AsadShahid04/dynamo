@@ -225,6 +225,8 @@ navigation:
             path: pages/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
             path: pages/kubernetes/operations/performance-tuning.md
+          - page: Restart a DGD
+            path: pages/kubernetes/operations/restart-a-dgd.md
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
 
