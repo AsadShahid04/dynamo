@@ -219,6 +219,8 @@ navigation:
         icon: screwdriver-wrench
         collapsed: open-by-default
         contents:
+          - page: Update and Roll Back a DGD
+            path: pages/kubernetes/operations/update-and-rollback-dgd.md
           - page: Observability
             path: pages/kubernetes/operations/observability.mdx
           - page: Benchmarking with AIPerf
