@@ -721,6 +721,9 @@ This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations ab
 These are independent capabilities you opt into per workload. None are required for a working deployment.
 
 <CardGroup cols={2}>
+  <Card title="Update and Roll Back a DGD" icon="regular rotate" href="../operations/update-and-rollback-dgd.md">
+    Change worker images, args, or resources on a running DGD and roll back when needed.
+  </Card>
   <Card title="Deploy on Intel GPUs" icon="regular microchip" href="deploy-on-intel-gpus.mdx">
     Adapt the DGD for Intel XPU with a custom vLLM runtime image and Kubernetes DRA.
   </Card>
