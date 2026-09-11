@@ -444,6 +444,19 @@ impl MockerExecutionContext {
             tracing::info!("Engine startup simulation completed");
         }
 
+        // Signal endpoint readiness to the runtime so model card publishing
+        // waits for startup to complete (fixes #14686).
+        endpoint
+            .component()
+            .drt()
+            .system_health()
+            .lock()
+            .set_endpoint_health_status(endpoint.name(), crate::config::HealthStatus::Ready);
+        tracing::debug!(
+            endpoint = endpoint.name(),
+            "Set endpoint health status to Ready after startup"
+        );
+
         let kv_endpoint = if self.engine_args.needs_kv_publisher() {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
