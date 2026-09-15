@@ -3221,6 +3221,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
+            # Track whether we've seen cached tokens. vLLM provides num_cached_tokens
+            # after prefill completes; continuous_usage_stats clients need it on
+            # the first generated-token chunk, not only at finish_reason.
+            seen_cached_tokens = False
             async for res in gen:
                 # res is vllm's RequestOutput
                 if (
@@ -3289,6 +3293,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         out["log_probs"] = log_probs
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
+
+                    # Attach completion_usage as soon as num_cached_tokens is available
+                    # (typically after prefill), not only on finish_reason. This supports
+                    # continuous_usage_stats clients that need cache accounting on every
+                    # chunk, and ensures clients that cancel early still see cache usage.
+                    num_cached_tokens = getattr(res, "num_cached_tokens", None)
+                    should_emit_usage = (
+                        not seen_cached_tokens
+                        and num_cached_tokens is not None
+                        and token_ids  # Only emit on actual content chunks
+                    )
+                    if should_emit_usage:
+                        seen_cached_tokens = True
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            completion_token_counts=total_output_tokens_by_index,
+                        )
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
@@ -3732,6 +3755,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
         first_token_output_seen = False
+        # Track whether we've emitted usage with cached tokens on a content chunk.
+        # Mirrors the generate_tokens path for consistent continuous_usage_stats behavior.
+        seen_cached_tokens_in_text_mode = False
 
         trace_headers = context.trace_headers()
 
@@ -3817,6 +3843,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "model": "unknown",
                             "choices": [choice_data],
                         }
+
+                        # Attach usage as soon as num_cached_tokens is available.
+                        # Mirrors the generate_tokens logic for continuous_usage_stats.
+                        num_cached_tokens = getattr(res, "num_cached_tokens", None)
+                        if (
+                            not seen_cached_tokens_in_text_mode
+                            and num_cached_tokens is not None
+                            and delta_text  # Only on content chunks
+                        ):
+                            seen_cached_tokens_in_text_mode = True
+                            chunk["usage"] = BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                            )
 
                         if output.finish_reason:
                             chunk["usage"] = BaseWorkerHandler._build_completion_usage(
