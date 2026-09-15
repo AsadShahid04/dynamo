@@ -322,6 +322,79 @@ class TestReasoningParserForwarding:
         assert calls == {"called": True}
 
     @pytest.mark.asyncio
+    async def test_generate_tokens_emits_cached_tokens_on_first_chunk(self):
+        """completion_usage with cached_tokens should appear on the first content
+        chunk when num_cached_tokens is available, not only at finish_reason.
+        
+        This supports continuous_usage_stats clients that need cache accounting
+        on every chunk, and ensures clients that cancel early still see cache usage.
+        """
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            # First chunk: has tokens and num_cached_tokens, no finish_reason yet
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        routed_experts=None,
+                        finish_reason=None,
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2, 3, 4, 5],  # 5 prompt tokens
+                num_cached_tokens=3,  # 3 were cached
+                prompt_logprobs=None,
+            )
+            # Second chunk: final
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=None,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2, 3, 4, 5],
+                num_cached_tokens=3,
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1, 2, 3, 4, 5]),
+            SamplingParams(max_tokens=2),
+            "req-cached",
+        ):
+            chunks.append(chunk)
+
+        # First chunk should have completion_usage with cached_tokens
+        assert len(chunks) == 2
+        assert "completion_usage" in chunks[0], "First chunk should have completion_usage"
+        first_usage = chunks[0]["completion_usage"]
+        assert first_usage["prompt_tokens"] == 5
+        assert first_usage["completion_tokens"] == 1
+        assert first_usage["total_tokens"] == 6
+        assert "prompt_tokens_details" in first_usage
+        assert first_usage["prompt_tokens_details"]["cached_tokens"] == 3
+
+        # Final chunk should also have completion_usage (existing behavior)
+        assert "completion_usage" in chunks[1]
+        final_usage = chunks[1]["completion_usage"]
+        assert final_usage["prompt_tokens"] == 5
+        assert final_usage["completion_tokens"] == 2  # cumulative
+        assert final_usage["prompt_tokens_details"]["cached_tokens"] == 3
+
+    @pytest.mark.asyncio
     async def test_generate_tokens_emits_routed_experts_on_final_chunk(self):
         from vllm.sampling_params import SamplingParams
 
