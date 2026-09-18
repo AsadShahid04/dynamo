@@ -141,6 +141,15 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
 {% endif %}
 
+# Download harmony/gpt-oss tiktoken files for air-gapped deployments.
+# These files are required for gpt-oss reasoning/tool parsing in offline environments.
+# Placed at /opt/dynamo/tiktoken/harmony/ and accessible via TIKTOKEN_CACHE_DIR.
+COPY --chmod=755 container/deps/download_harmony_tiktoken.sh /usr/local/bin/download_harmony_tiktoken
+RUN download_harmony_tiktoken /opt/dynamo/tiktoken/harmony && \
+    chown -R dynamo:0 /opt/dynamo/tiktoken && \
+    chmod -R g+r /opt/dynamo/tiktoken
+ENV TIKTOKEN_CACHE_DIR=/opt/dynamo/tiktoken
+
 # Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
 # install from source and skip the pip install RUN below, but they still need
 # the wheels on disk because tests/dependencies/test_kvbm_imports.py greps

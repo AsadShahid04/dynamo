@@ -170,6 +170,15 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
+# Download harmony/gpt-oss tiktoken files for air-gapped deployments.
+# These files are required for gpt-oss reasoning/tool parsing in offline environments.
+# Placed at /opt/dynamo/tiktoken/harmony/ and accessible via TIKTOKEN_CACHE_DIR.
+COPY --chmod=755 container/deps/download_harmony_tiktoken.sh /usr/local/bin/download_harmony_tiktoken
+RUN download_harmony_tiktoken /opt/dynamo/tiktoken/harmony && \
+    chown -R dynamo:0 /opt/dynamo/tiktoken && \
+    chmod -R g+r /opt/dynamo/tiktoken
+ENV TIKTOKEN_CACHE_DIR=/opt/dynamo/tiktoken
+
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/

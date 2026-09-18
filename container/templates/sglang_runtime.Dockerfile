@@ -101,6 +101,15 @@ ${LD_LIBRARY_PATH:-}
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
+# Download harmony/gpt-oss tiktoken files for air-gapped deployments.
+# These files are required for gpt-oss reasoning/tool parsing in offline environments.
+# Placed at /opt/dynamo/tiktoken/harmony/ and accessible via TIKTOKEN_CACHE_DIR.
+COPY --chmod=755 container/deps/download_harmony_tiktoken.sh /usr/local/bin/download_harmony_tiktoken
+RUN download_harmony_tiktoken /opt/dynamo/tiktoken/harmony && \
+    chown -R dynamo:0 /opt/dynamo/tiktoken && \
+    chmod -R g+r /opt/dynamo/tiktoken
+ENV TIKTOKEN_CACHE_DIR=/opt/dynamo/tiktoken
+
 # Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
 # packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps
 # pip from replacing that stack. Dev/local-dev build from source later in the

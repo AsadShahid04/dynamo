@@ -111,6 +111,15 @@ ENV DYNAMO_HOME=/opt/dynamo
 WORKDIR /
 COPY --chown=dynamo: --from=epp /epp /epp
 
+# Download harmony/gpt-oss tiktoken files for air-gapped deployments.
+# These files are required for gpt-oss reasoning/tool parsing in offline environments.
+# Placed at /opt/dynamo/tiktoken/harmony/ and accessible via TIKTOKEN_CACHE_DIR.
+COPY --chmod=755 container/deps/download_harmony_tiktoken.sh /usr/local/bin/download_harmony_tiktoken
+RUN download_harmony_tiktoken /opt/dynamo/tiktoken/harmony && \
+    chown -R dynamo: /opt/dynamo/tiktoken && \
+    chmod -R g+r /opt/dynamo/tiktoken
+ENV TIKTOKEN_CACHE_DIR=/opt/dynamo/tiktoken
+
 COPY --chown=dynamo: container/launch_message/frontend.txt /opt/dynamo/.launch_screen
 # Copy tests, benchmarks, deploy and components with correct ownership
 COPY --chown=dynamo: tests /workspace/tests

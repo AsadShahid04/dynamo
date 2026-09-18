@@ -4,6 +4,10 @@
 
 The NVIDIA Dynamo project uses containerized development and deployment to maintain consistent environments across different AI inference frameworks and deployment scenarios. This directory contains the tools for building and running Dynamo containers:
 
+### Air-Gapped Deployments
+
+For air-gapped environments, the container images include pre-installed harmony tiktoken vocabulary files required for gpt-oss reasoning and tool parsing. These files are located at `/opt/dynamo/tiktoken/harmony/` and are accessible via the `TIKTOKEN_CACHE_DIR` environment variable. No additional init containers or ConfigMaps are needed for gpt-oss deployments.
+
 ### Rendering Requirements:
 - Python
 - Python Packages:
