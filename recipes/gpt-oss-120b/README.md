@@ -31,6 +31,7 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 - Modality: Text (gpt-oss "harmony" format: reasoning + tool calls)
 - Reasoning (`gpt_oss` parser)
 - Tool / function calling (`harmony` tool-call parser) — `tool_calls` populates, `finish_reason: tool_calls`
+- Air-gapped deployments: harmony tiktoken vocabulary files are pre-installed in the runtime images at `/opt/dynamo/tiktoken/harmony/`
 
 ## Prerequisites
 
