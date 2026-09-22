@@ -522,6 +522,12 @@ def _prepare_request(
     # cannot produce contradictory template controls.
     if request_for_sampling.reasoning_effort is not None:
         chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    # Remove reasoning_effort if it's None so Jinja's `is not defined` guards work.
+    # The gpt-oss template does "Reasoning: " + reasoning_effort guarded by
+    # `is not defined`, but None IS defined in Jinja, causing str + None errors.
+    # See ai-dynamo/dynamo#14936.
+    if chat_template_kwargs.get("reasoning_effort") is None:
+        chat_template_kwargs.pop("reasoning_effort", None)
     chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
         chat_template_kwargs,
         default_thinking_mode,

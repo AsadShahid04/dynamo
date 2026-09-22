@@ -2949,6 +2949,51 @@ class TestChatTemplateKwargsForwarding:
         assert "enable_thinking" not in chat_template_kwargs
         assert "thinking_mode" not in chat_template_kwargs
 
+    def test_reasoning_effort_none_omitted_from_template_kwargs(self, tokenizer):
+        """reasoning_effort=None is omitted so Jinja `is not defined` guards work.
+        
+        Regression test for ai-dynamo/dynamo#14936: gpt-oss template does
+        "Reasoning: " + reasoning_effort guarded by `is not defined`, but None IS
+        defined in Jinja, causing str + None type errors.
+        """
+        _, _, chat_template_kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": None,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert "reasoning_effort" not in chat_template_kwargs
+
+    def test_reasoning_effort_none_in_nested_kwargs_omitted(self, tokenizer):
+        """reasoning_effort=None in chat_template_kwargs is also omitted."""
+        _, _, chat_template_kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"reasoning_effort": None},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert "reasoning_effort" not in chat_template_kwargs
+
+    def test_reasoning_effort_explicit_value_retained(self, tokenizer):
+        """Explicit non-None reasoning_effort values are retained."""
+        for effort in ["low", "medium", "high", "max"]:
+            _, _, chat_template_kwargs, _, _ = _prepare_request(
+                {
+                    "model": MODEL,
+                    "messages": self._messages(),
+                    "reasoning_effort": effort,
+                },
+                tokenizer=tokenizer,
+                tool_parser_class=None,
+            )
+            assert chat_template_kwargs["reasoning_effort"] == effort
+
     def test_default_thinking_mode_disabled_reaches_template_kwargs(self, tokenizer):
         _, _, chat_template_kwargs, _, chat_params = _prepare_request(
             {
