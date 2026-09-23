@@ -143,6 +143,10 @@ pub mod labels {
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
+    /// Label for request phase (e.g., "aggregated", "prefill", "decode")
+    /// Distinguishes routing and execution phases in disaggregated serving.
+    pub const PHASE: &str = "phase";
+
     /// Label for router instance (discovery.instance_id() of the frontend)
     pub const ROUTER_ID: &str = "router_id";
 }

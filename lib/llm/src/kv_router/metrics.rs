@@ -842,18 +842,35 @@ impl RoutingOverheadMetrics {
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
 /// independently.
+///
+/// # Phase and Model Labels
+///
+/// Per-attempt metrics (TTFT, ITL, sequence tokens, KV hit rate) carry `phase` and
+/// `model` labels to distinguish different models and prefill/decode/aggregated phases
+/// in a single frontend. The `phase` label is `aggregated` | `prefill` | `decode`.
 pub struct RouterRequestMetrics {
-    pub requests_total: prometheus::IntCounter,
-    pub time_to_first_token_seconds: prometheus::Histogram,
-    pub inter_token_latency_seconds: prometheus::Histogram,
-    pub input_sequence_tokens: prometheus::Histogram,
-    pub output_sequence_tokens: prometheus::Histogram,
-    pub kv_hit_rate: prometheus::Histogram,
+    pub requests_total: IntCounterVec,
+    pub time_to_first_token_seconds: HistogramVec,
+    pub inter_token_latency_seconds: HistogramVec,
+    pub input_sequence_tokens: HistogramVec,
+    pub output_sequence_tokens: HistogramVec,
+    pub kv_hit_rate: HistogramVec,
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+}
+
+/// Per-request metric handles with phase and model labels already bound.
+#[derive(Clone)]
+pub struct RouterRequestMetricHandles {
+    pub requests_total: IntCounter,
+    pub time_to_first_token_seconds: prometheus::Histogram,
+    pub inter_token_latency_seconds: prometheus::Histogram,
+    pub input_sequence_tokens: prometheus::Histogram,
+    pub output_sequence_tokens: prometheus::Histogram,
+    pub kv_hit_rate: prometheus::Histogram,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -870,6 +887,22 @@ impl RouterRequestMetrics {
         ROUTER_REQUESTS_STARTED_TOTAL
             .get()
             .expect("router request metrics must be initialized")
+    }
+
+    /// Get metric handles for a specific phase and model.
+    pub fn handles(&self, phase: &str, model: &str) -> RouterRequestMetricHandles {
+        RouterRequestMetricHandles {
+            requests_total: self.requests_total.with_label_values(&[phase, model]),
+            time_to_first_token_seconds: self
+                .time_to_first_token_seconds
+                .with_label_values(&[phase, model]),
+            inter_token_latency_seconds: self
+                .inter_token_latency_seconds
+                .with_label_values(&[phase, model]),
+            input_sequence_tokens: self.input_sequence_tokens.with_label_values(&[phase, model]),
+            output_sequence_tokens: self.output_sequence_tokens.with_label_values(&[phase, model]),
+            kv_hit_rate: self.kv_hit_rate.with_label_values(&[phase, model]),
+        }
     }
 
     /// Create from a Component, memoized in a static OnceLock.
@@ -900,48 +933,54 @@ impl RouterRequestMetrics {
                     "router_requests_started_total already initialized"
                 );
                 let requests_total = metrics
-                    .create_intcounter(
+                    .create_intcountervec(
                         &router_metric(frontend_service::REQUESTS_TOTAL),
                         "Total number of requests processed by the router",
+                        &[labels::PHASE, labels::MODEL],
                         extra_labels,
                     )
                     .expect("failed to create router_requests_total");
                 let time_to_first_token_seconds = metrics
-                    .create_histogram(
+                    .create_histogramvec(
                         &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
                         "Time to first token observed at the router",
+                        &[labels::PHASE, labels::MODEL],
                         extra_labels,
                         Some(generate_log_buckets(0.001, 480.0, 18)),
                     )
                     .expect("failed to create router_time_to_first_token_seconds");
                 let inter_token_latency_seconds = metrics
-                    .create_histogram(
+                    .create_histogramvec(
                         &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
                         "Average inter-token latency observed at the router",
+                        &[labels::PHASE, labels::MODEL],
                         extra_labels,
                         Some(generate_log_buckets(0.001, 2.0, 13)),
                     )
                     .expect("failed to create router_inter_token_latency_seconds");
                 let input_sequence_tokens = metrics
-                    .create_histogram(
+                    .create_histogramvec(
                         &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
                         "Input sequence length in tokens observed at the router",
+                        &[labels::PHASE, labels::MODEL],
                         extra_labels,
                         Some(generate_log_buckets(50.0, 128000.0, 12)),
                     )
                     .expect("failed to create router_input_sequence_tokens");
                 let output_sequence_tokens = metrics
-                    .create_histogram(
+                    .create_histogramvec(
                         &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
                         "Output sequence length in tokens observed at the router",
+                        &[labels::PHASE, labels::MODEL],
                         extra_labels,
                         Some(generate_log_buckets(50.0, 32000.0, 10)),
                     )
                     .expect("failed to create router_output_sequence_tokens");
                 let kv_hit_rate = metrics
-                    .create_histogram(
+                    .create_histogramvec(
                         &router_metric(frontend_service::KV_HIT_RATE),
                         "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                        &[labels::PHASE, labels::MODEL],
                         extra_labels,
                         Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
@@ -1683,6 +1722,81 @@ mod kv_publisher_registration_tests {
             err.to_string()
                 .contains("conflicts with auto-injected const label"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn router_request_metrics_have_phase_and_model_labels() {
+        // Regression test for #15176: per-attempt router metrics must carry
+        // `phase` and `model` labels to distinguish different models and
+        // prefill/decode/aggregated phases in a single frontend.
+        let hierarchy = FakeHierarchy::component("dynamo", "router", 0x1234);
+        let metrics = RouterRequestMetrics::build(&hierarchy);
+
+        // Observe metrics for two different phase/model combinations
+        let handles_agg_model_a = metrics.handles("aggregated", "model-a");
+        handles_agg_model_a.requests_total.inc();
+        handles_agg_model_a
+            .time_to_first_token_seconds
+            .observe(0.1);
+        handles_agg_model_a.input_sequence_tokens.observe(128.0);
+
+        let handles_decode_model_b = metrics.handles("decode", "model-b");
+        handles_decode_model_b.requests_total.inc();
+        handles_decode_model_b.requests_total.inc();
+        handles_decode_model_b
+            .time_to_first_token_seconds
+            .observe(0.05);
+        handles_decode_model_b.output_sequence_tokens.observe(256.0);
+
+        let expfmt = hierarchy.expfmt();
+
+        // Assert that the metrics contain distinct series for each phase/model combination
+        assert!(
+            expfmt.contains(r#"phase="aggregated",model="model-a""#),
+            "missing aggregated/model-a series in exposition:\n{expfmt}"
+        );
+        assert!(
+            expfmt.contains(r#"phase="decode",model="model-b""#),
+            "missing decode/model-b series in exposition:\n{expfmt}"
+        );
+
+        // Verify requests_total has correct values for each combination
+        assert!(
+            expfmt.contains(
+                r#"dynamo_component_router_requests_total{dynamo_component="router",dynamo_namespace="dynamo",model="model-a",phase="aggregated",router_id="1234",worker_id="1234"} 1"#
+            ),
+            "wrong count for aggregated/model-a in:\n{expfmt}"
+        );
+        assert!(
+            expfmt.contains(
+                r#"dynamo_component_router_requests_total{dynamo_component="router",dynamo_namespace="dynamo",model="model-b",phase="decode",router_id="1234",worker_id="1234"} 2"#
+            ),
+            "wrong count for decode/model-b in:\n{expfmt}"
+        );
+
+        // Verify that input_sequence_tokens only appears for the combination that recorded it
+        let isl_metric_name = exported_name(frontend_service::INPUT_SEQUENCE_TOKENS);
+        let isl_lines: Vec<_> = expfmt
+            .lines()
+            .filter(|line| line.starts_with(&isl_metric_name))
+            .collect();
+        assert!(
+            isl_lines.iter().any(|line| line.contains(r#"phase="aggregated",model="model-a""#)),
+            "input_sequence_tokens should have aggregated/model-a series in:\n{}",
+            isl_lines.join("\n")
+        );
+
+        // Verify that output_sequence_tokens only appears for the combination that recorded it
+        let osl_metric_name = exported_name(frontend_service::OUTPUT_SEQUENCE_TOKENS);
+        let osl_lines: Vec<_> = expfmt
+            .lines()
+            .filter(|line| line.starts_with(&osl_metric_name))
+            .collect();
+        assert!(
+            osl_lines.iter().any(|line| line.contains(r#"phase="decode",model="model-b""#)),
+            "output_sequence_tokens should have decode/model-b series in:\n{}",
+            osl_lines.join("\n")
         );
     }
 }

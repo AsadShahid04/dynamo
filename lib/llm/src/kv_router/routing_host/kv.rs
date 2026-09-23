@@ -370,11 +370,11 @@ where
                 );
                 tracker.record_router_queue_depth(chooser.pending_count());
                 if let Some(hit_rate) = tracker.kv_hit_rate() {
-                    guard.request_metrics().kv_hit_rate.observe(hit_rate);
+                    guard.metric_handles().kv_hit_rate.observe(hit_rate);
                 }
             }
             guard
-                .request_metrics()
+                .metric_handles()
                 .input_sequence_tokens
                 .observe(request.token_ids.len() as f64);
             Ok(())

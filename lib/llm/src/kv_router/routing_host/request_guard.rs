@@ -249,6 +249,9 @@ impl CanonicalOutputTracker {
 struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,
+    phase: String,
+    model: String,
+    metric_handles: RouterRequestMetricHandles,
     cumulative_osl: usize,
     metrics_recorded: bool,
     first_token_recorded: bool,
@@ -260,10 +263,16 @@ impl RequestObservability {
     fn new(
         tracker: Option<Arc<RequestTracker>>,
         request_metrics: Arc<RouterRequestMetrics>,
+        phase: String,
+        model: String,
     ) -> Self {
+        let metric_handles = request_metrics.handles(&phase, &model);
         Self {
             tracker,
             request_metrics,
+            phase,
+            model,
+            metric_handles,
             cumulative_osl: 0,
             metrics_recorded: false,
             first_token_recorded: false,
@@ -303,7 +312,7 @@ impl RequestObservability {
                     tracker.record_decode_first_token();
                 }
                 if let Some(ttft) = tracker.ttft_ms() {
-                    self.request_metrics
+                    self.metric_handles
                         .time_to_first_token_seconds
                         .observe(ttft / 1000.0);
                 }
@@ -327,7 +336,7 @@ impl RequestObservability {
         tracker.record_osl(self.cumulative_osl);
         tracker.record_finish();
         if let Some(avg_itl) = tracker.avg_itl_ms() {
-            self.request_metrics
+            self.metric_handles
                 .inter_token_latency_seconds
                 .observe(avg_itl / 1000.0);
         }
@@ -344,7 +353,7 @@ impl RequestObservability {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
             if record_itl_at_completion && let Some(avg_itl) = tracker.avg_itl_ms() {
-                self.request_metrics
+                self.metric_handles
                     .inter_token_latency_seconds
                     .observe(avg_itl / 1000.0);
             }
@@ -355,11 +364,11 @@ impl RequestObservability {
             }
         }
         if self.cumulative_osl > 0 {
-            self.request_metrics
+            self.metric_handles
                 .output_sequence_tokens
                 .observe(self.cumulative_osl as f64);
         }
-        self.request_metrics.requests_total.inc();
+        self.metric_handles.requests_total.inc();
     }
 }
 
@@ -612,9 +621,20 @@ where
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|t| t.phase().to_string())
+            .unwrap_or_else(|| "aggregated".to_string());
+        let model = request.model.clone();
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
-            observability: RequestObservability::new(request.tracker.clone(), request_metrics),
+            observability: RequestObservability::new(
+                request.tracker.clone(),
+                request_metrics,
+                phase,
+                model,
+            ),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
                 isl_tokens,
@@ -638,6 +658,12 @@ where
         request: &PreprocessedRequest,
     ) -> Self {
         request_metrics.requests_started_total().inc();
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|t| t.phase().to_string())
+            .unwrap_or_else(|| "aggregated".to_string());
+        let model = request.model.clone();
         Self {
             cleanup: match occupancy_reservation {
                 Some(reservation) => RequestCleanup::Occupancy {
@@ -646,7 +672,12 @@ where
                 },
                 None => RequestCleanup::Stateless { worker_id },
             },
-            observability: RequestObservability::new(request.tracker.clone(), request_metrics),
+            observability: RequestObservability::new(
+                request.tracker.clone(),
+                request_metrics,
+                phase,
+                model,
+            ),
             // Builtin policies do not track scheduler blocks. Emit one final ITL sample
             // when the request completes rather than observing every streamed token.
             output_blocks: OutputBlockTracker::new(false, request.token_ids.len(), 1, None),
@@ -671,6 +702,10 @@ where
 
     pub(super) fn request_metrics(&self) -> &RouterRequestMetrics {
         self.observability.request_metrics()
+    }
+
+    pub(super) fn metric_handles(&self) -> &RouterRequestMetricHandles {
+        &self.observability.metric_handles
     }
 
     pub(super) fn start_dispatch(&mut self, phase_label: &str) {
