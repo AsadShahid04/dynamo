@@ -57,6 +57,14 @@ pub(crate) struct DeltaGeneratorState {
     usage: CompletionUsage,
     options: DeltaGeneratorOptions,
     tracker: Arc<RequestTracker>,
+    /// The original prompt token count (ISL) set at request start. Once set,
+    /// this pins the client-facing `prompt_tokens` value to prevent backend-
+    /// reported prompt lengths from overwriting it after migration. When a
+    /// worker fails mid-stream, RetryManager appends already-generated tokens
+    /// to the retry request; the new worker sees those as part of its prompt
+    /// and inflates `prompt_tokens`. Pinning the original ISL ensures the client
+    /// sees the true prompt length, not the replayed prompt + completion prefix.
+    original_isl: Option<u32>,
 }
 
 impl DeltaGeneratorState {
@@ -96,6 +104,7 @@ impl DeltaGeneratorState {
             usage,
             options,
             tracker,
+            original_isl: None,
         }
     }
 
@@ -132,6 +141,13 @@ impl DeltaGeneratorState {
     }
 
     pub(crate) fn update_isl(&mut self, isl: u32) {
+        // Pin the original ISL on first update. This prevents backend-reported
+        // prompt_tokens from overwriting the true client-facing prompt length
+        // after a migration retry, where the backend sees replayed completion
+        // tokens as part of its prompt.
+        if self.original_isl.is_none() {
+            self.original_isl = Some(isl);
+        }
         self.usage.prompt_tokens = isl;
     }
 
@@ -151,7 +167,15 @@ impl DeltaGeneratorState {
         // This is critical for prompt embeddings where prompt_tokens comes from
         // the embedding sequence length computed by the worker.
         if let Some(completion_usage) = output.completion_usage.as_ref() {
-            self.usage.prompt_tokens = completion_usage.prompt_tokens;
+            // If we have a pinned original ISL (set via update_isl before any backend
+            // output), preserve it as the client-facing prompt_tokens. The backend may
+            // report an inflated prompt length after migration because RetryManager
+            // appends already-delivered tokens to the retry request. Those tokens are
+            // already counted in completion_tokens, so overwriting prompt_tokens here
+            // would double-count them.
+            if self.original_isl.is_none() {
+                self.usage.prompt_tokens = completion_usage.prompt_tokens;
+            }
             self.usage.completion_tokens = self
                 .usage
                 .completion_tokens
@@ -220,6 +244,7 @@ pub(crate) fn force_include_usage(stream_options: &mut Option<ChatCompletionStre
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::llm_backend::BackendOutput;
 
     #[test]
     fn force_include_usage_inserts_missing_options() {
@@ -245,4 +270,129 @@ mod tests {
         assert!(options.include_usage);
         assert!(options.continuous_usage_stats);
     }
+
+    #[test]
+    fn update_isl_pins_original_prompt_tokens() {
+        let mut state = DeltaGeneratorState::new(
+            "test-id".to_string(),
+            "chat.completion".to_string(),
+            "test-model".to_string(),
+            DeltaGeneratorOptions::default(),
+        );
+
+        // First update_isl call should pin the original ISL
+        state.update_isl(6);
+        assert_eq!(state.original_isl, Some(6));
+        assert_eq!(state.usage.prompt_tokens, 6);
+
+        // Subsequent update_isl calls should not change the pinned original ISL
+        state.update_isl(18);
+        assert_eq!(state.original_isl, Some(6), "original ISL must remain pinned");
+        assert_eq!(
+            state.usage.prompt_tokens, 18,
+            "usage.prompt_tokens can still be updated"
+        );
+    }
+
+    #[test]
+    fn update_usage_preserves_pinned_isl_after_migration() {
+        let mut state = DeltaGeneratorState::new(
+            "test-id".to_string(),
+            "chat.completion".to_string(),
+            "test-model".to_string(),
+            DeltaGeneratorOptions::default(),
+        );
+
+        // Simulate initial ISL update (6-token prompt)
+        state.update_isl(6);
+        assert_eq!(state.original_isl, Some(6));
+        assert_eq!(state.usage.prompt_tokens, 6);
+
+        // Simulate backend output that inflates prompt_tokens after migration.
+        // The worker sees the original 6 prompt tokens + 12 replayed completion
+        // tokens = 18 total, and reports prompt_tokens=18.
+        let backend_usage = CompletionUsage {
+            prompt_tokens: 18, // inflated due to replayed tokens
+            completion_tokens: 10,
+            total_tokens: 28,
+            completion_tokens_details: None,
+            prompt_tokens_details: None,
+        };
+        let output = BackendOutput {
+            token_ids: vec![100, 101, 102],
+            tokens: vec![],
+            text: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: None,
+            stop_reason: None,
+            index: None,
+            completion_usage: Some(backend_usage),
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            engine_data: None,
+            routing_data: None,
+        };
+
+        state.update_usage_from_backend_output(&output);
+
+        // The original ISL (6) must be preserved as client-facing prompt_tokens
+        assert_eq!(
+            state.usage.prompt_tokens, 6,
+            "prompt_tokens must stay pinned to original ISL after migration"
+        );
+        assert_eq!(state.usage.completion_tokens, 10);
+        assert_eq!(state.get_usage().total_tokens, 16); // 6 + 10
+    }
+
+    #[test]
+    fn update_usage_allows_backend_prompt_tokens_without_pinned_isl() {
+        let mut state = DeltaGeneratorState::new(
+            "test-id".to_string(),
+            "chat.completion".to_string(),
+            "test-model".to_string(),
+            DeltaGeneratorOptions::default(),
+        );
+
+        // No update_isl call, so original_isl remains None
+        assert_eq!(state.original_isl, None);
+
+        // Backend-reported prompt_tokens should be accepted when original_isl is None
+        let backend_usage = CompletionUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            completion_tokens_details: None,
+            prompt_tokens_details: None,
+        };
+        let output = BackendOutput {
+            token_ids: vec![1, 2, 3],
+            tokens: vec![],
+            text: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: None,
+            stop_reason: None,
+            index: None,
+            completion_usage: Some(backend_usage),
+            disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            engine_data: None,
+            routing_data: None,
+        };
+
+        state.update_usage_from_backend_output(&output);
+
+        // Without a pinned ISL, backend-reported prompt_tokens should be accepted
+        assert_eq!(
+            state.usage.prompt_tokens, 100,
+            "backend prompt_tokens should be accepted when ISL is not pinned"
+        );
+        assert_eq!(state.usage.completion_tokens, 50);
+    }
 }
+
