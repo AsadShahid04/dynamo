@@ -207,30 +207,24 @@ class VllmOmniHealthCheckPayload(HealthCheckPayload):
     """
     vLLM-Omni-specific health check payload.
 
-    Unlike standard vLLM workers, Omni workers use AsyncOmni which requires
-    async access to the tokenizer. Use the async create() classmethod to
-    properly initialize with the model's BOS token.
+    Uses a prompt-based payload that works across all Omni modalities
+    (text, image, video, audio). The unified Omni handlers accept prompt
+    fields and route based on request shape, so a simple text prompt is
+    sufficient to verify engine health without requiring modality-specific
+    payloads.
     """
 
-    def __init__(self, bos_token_id: int = 1):
+    def __init__(self):
         """
-        Initialize vLLM-Omni health check payload with BOS token.
+        Initialize vLLM-Omni health check payload with a modality-agnostic prompt.
 
-        Args:
-            bos_token_id: BOS token ID from the model, or default to 1.
+        Uses a simple prompt field that works for all Omni handler types
+        (text/image/video/audio), avoiding token_ids which would fail
+        schema validation in media handlers.
         """
         self.default_payload = {
-            "token_ids": [bos_token_id],
-            "sampling_options": {
-                "temperature": 0.0,
-            },
-            "stop_conditions": {
-                "max_tokens": 1,
-                "stop": None,
-                "stop_token_ids": None,
-                "include_stop_str_in_output": False,
-                "ignore_eos": False,
-            },
+            "prompt": "probe",
+            "max_tokens": 1,
         }
         super().__init__()
 
@@ -240,13 +234,12 @@ class VllmOmniHealthCheckPayload(HealthCheckPayload):
     @classmethod
     async def create(cls, async_omni: "AsyncOmni") -> "VllmOmniHealthCheckPayload":
         """
-        Create VllmOmniHealthCheckPayload by extracting BOS token from AsyncOmni.
+        Create VllmOmniHealthCheckPayload for AsyncOmni orchestrator.
 
         Args:
             async_omni: AsyncOmni orchestrator instance
 
         Returns:
-            VllmOmniHealthCheckPayload instance with proper BOS token
+            VllmOmniHealthCheckPayload instance with modality-agnostic payload
         """
-        bos_token_id = await get_bos_token_from_omni(async_omni)
-        return cls(bos_token_id)
+        return cls()
