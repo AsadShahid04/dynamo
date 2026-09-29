@@ -233,12 +233,44 @@ impl HealthCheckManager {
                         // Get the first response to verify endpoint is alive.
                         // Check for errors
                         let is_healthy = if let Some(response) = response_stream.next().await {
+                            // First check transport-level errors
                             if let Some(error) = response.err() {
                                 warn!(
                                     "Health check error response from {}: {:?}",
                                     endpoint_subject_owned, error
                                 );
                                 false
+                            } else if let Some(data) = &response.data {
+                                // Check for content-level errors in Omni/media responses:
+                                // - finish_reason: "error" indicates generation failed
+                                // - status: "failed" indicates stage unavailability
+                                let has_content_error = data.as_object().map(|obj| {
+                                    // Check for finish_reason: "error" in choices array
+                                    let has_error_finish = obj.get("choices")
+                                        .and_then(|c| c.as_array())
+                                        .and_then(|arr| arr.first())
+                                        .and_then(|choice| choice.get("finish_reason"))
+                                        .and_then(|fr| fr.as_str())
+                                        .is_some_and(|fr| fr == "error");
+                                    
+                                    // Check for status: "failed" (audio/media responses)
+                                    let has_failed_status = obj.get("status")
+                                        .and_then(|s| s.as_str())
+                                        .is_some_and(|s| s == "failed");
+                                    
+                                    has_error_finish || has_failed_status
+                                }).unwrap_or(false);
+
+                                if has_content_error {
+                                    warn!(
+                                        "Health check content-level error from {}: response contains error indicators",
+                                        endpoint_subject_owned
+                                    );
+                                    false
+                                } else {
+                                    debug!("Health check successful for {}", endpoint_subject_owned);
+                                    true
+                                }
                             } else {
                                 debug!("Health check successful for {}", endpoint_subject_owned);
                                 true
@@ -695,6 +727,140 @@ mod push_handler_notify_tests {
             HealthStatus::Ready,
             "successful chunks should set Ready despite trailing error",
         );
+    }
+
+    // =================================================================
+    // Test 6: Content-level error (finish_reason: "error") → NotReady
+    // Engine returns HTTP 200 but response contains error indicators.
+    // =================================================================
+    #[tokio::test]
+    async fn test_content_level_error_finish_reason() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.content_error_finish";
+
+        // Register an engine that returns a valid transport response but with
+        // finish_reason: "error" in the content
+        let engine = Arc::new(MockStreamingEngineWithContent::new(
+            1,
+            serde_json::json!({
+                "choices": [{
+                    "finish_reason": "error"
+                }]
+            }),
+        ));
+        let _notifier = register_endpoint(&drt, endpoint, engine.clone());
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        start_manager(&drt, 50).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Canary fired but content-level error detected
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "content-level error (finish_reason: error) should keep status NotReady",
+        );
+    }
+
+    // =================================================================
+    // Test 7: Content-level error (status: "failed") → NotReady
+    // Engine returns HTTP 200 but audio/media response has status: "failed"
+    // =================================================================
+    #[tokio::test]
+    async fn test_content_level_error_status_failed() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.content_error_status";
+
+        // Register an engine that returns status: "failed" (audio/media failure)
+        let engine = Arc::new(MockStreamingEngineWithContent::new(
+            1,
+            serde_json::json!({
+                "status": "failed",
+                "error": "stage unavailable"
+            }),
+        ));
+        let _notifier = register_endpoint(&drt, endpoint, engine.clone());
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        start_manager(&drt, 50).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Canary fired but content-level error detected
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "content-level error (status: failed) should keep status NotReady",
+        );
+    }
+
+    // =================================================================
+    // Test 8: Successful content without error indicators → Ready
+    // Verify we don't false-positive on normal responses
+    // =================================================================
+    #[tokio::test]
+    async fn test_successful_content_without_errors() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.success_content";
+
+        // Register an engine that returns valid content without error indicators
+        let engine = Arc::new(MockStreamingEngineWithContent::new(
+            1,
+            serde_json::json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"content": "ok"}
+                }]
+            }),
+        ));
+        let _notifier = register_endpoint(&drt, endpoint, engine.clone());
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        start_manager(&drt, 50).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Canary fired with successful content
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "successful content should set Ready",
+        );
+    }
+
+    /// Mock engine that returns specific JSON content
+    struct MockStreamingEngineWithContent {
+        num_chunks: usize,
+        content: serde_json::Value,
+    }
+
+    impl MockStreamingEngineWithContent {
+        fn new(num_chunks: usize, content: serde_json::Value) -> Self {
+            Self {
+                num_chunks,
+                content,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for MockStreamingEngineWithContent
+    {
+        async fn generate(
+            &self,
+            input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            let (_data, ctx) = input.into_parts();
+            let chunks: Vec<TestResponse> = (0..self.num_chunks)
+                .map(|_| Annotated::from_data(self.content.clone()))
+                .collect();
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter(chunks)),
+                ctx.context(),
+            ))
+        }
     }
 }
 

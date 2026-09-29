@@ -89,3 +89,22 @@ def test_embedding_payload_omits_model_when_no_name():
     assert "model" not in payload
     assert payload.get("input") == "probe"
     assert payload.get(HEALTH_CHECK_KEY) is True
+
+
+def test_omni_payload_shape_matches_modality_agnostic_contract():
+    """``VllmOmniHealthCheckPayload`` must produce a modality-agnostic
+    payload that works for all Omni handler types (text/image/video/audio).
+    
+    The old token_ids + sampling_options payload would fail schema
+    validation in media handlers that require prompt fields. The new
+    prompt-based payload works across all modalities.
+    """
+    payload = VllmOmniHealthCheckPayload().to_dict()
+    # Must have prompt field that Omni handlers accept
+    assert payload.get("prompt") == "probe"
+    assert payload.get("max_tokens") == 1
+    assert payload.get(HEALTH_CHECK_KEY) is True
+    # Must NOT carry the old token_ids shape that media handlers reject
+    assert "token_ids" not in payload
+    assert "sampling_options" not in payload
+    assert "stop_conditions" not in payload
