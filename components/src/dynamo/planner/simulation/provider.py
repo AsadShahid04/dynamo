@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import gzip
 import itertools
-import json
 import math
 import warnings
 from collections.abc import Mapping, Sequence
@@ -82,6 +80,7 @@ _PLANNER_PASSTHROUGH = (
     "enable_load_scaling",
     "throughput_adjustment_interval_seconds",
     "load_adjustment_interval_seconds",
+    "max_throughput_scaling_replicas",
     "max_num_fpm_samples",
     "fpm_sample_bucket_size",
     "load_scaling_down_sensitivity",
@@ -412,6 +411,7 @@ class PlannerSearchSpace(BaseModel):
     # ``None`` preserves the legacy provider behavior of inheriting the
     # candidate's GPU budget. The public schema always supplies its default 8.
     max_num_gpus: int | None = Field(default=None, ge=1)
+    max_throughput_scaling_replicas: int = Field(default=8, ge=1)
     public_schema: bool = False
     public_policy: list[str] | None = None
     planner_target: str | None = None
@@ -560,34 +560,6 @@ def _plain(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 
 
-def _dynamo_trace_is_agentic(traffic: Mapping[str, JSONValue]) -> bool:
-    source = traffic.get("source")
-    if not isinstance(source, Mapping):
-        return False
-    paths = source.get("paths")
-    if not isinstance(paths, list):
-        return False
-    for raw_path in paths:
-        path = str(raw_path)
-        opener = gzip.open if path.endswith(".gz") else open
-        with opener(path, "rt", encoding="utf-8") as trace_file:
-            for line in trace_file:
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, Mapping):
-                    continue
-                event = record.get("event", record)
-                if not isinstance(event, Mapping):
-                    continue
-                event_type = event.get("event_type", record.get("event_type"))
-                if event_type != "request_end":
-                    continue
-                if event.get("agent_context") is not None:
-                    return True
-    return False
-
-
 def _planner_optimization_target(goal: Mapping[str, JSONValue]) -> str:
     target = str(_plain(goal.get("target", "throughput")))
     if target == "pareto":
@@ -682,12 +654,6 @@ class DynamoPlannerSweepConfigProvider:
                 raise ValueError(
                     "planner.policy=enabled requires at least one scaling mode"
                 )
-            source = context.traffic.get("source")
-            trace_format = source.get("format") if isinstance(source, Mapping) else None
-            if trace_format in {"mooncake-delta", "agentic_mooncake"} or (
-                trace_format == "dynamo" and _dynamo_trace_is_agentic(context.traffic)
-            ):
-                raise ValueError(f"{trace_format} requires planner.policy=disabled")
             if public.enable_throughput_scaling:
                 raw_sla = context.evaluation.get("sla")
                 if (
@@ -723,6 +689,7 @@ class DynamoPlannerSweepConfigProvider:
             "enable_load_scaling": public.enable_load_scaling,
             "throughput_adjustment_interval_seconds": public.throughput_adjustment_interval_seconds,
             "load_adjustment_interval_seconds": public.load_adjustment_interval_seconds,
+            "max_throughput_scaling_replicas": public.max_throughput_scaling_replicas,
             "max_num_gpus": public.max_num_gpus,
             "min_workers": public.min_workers,
         }
@@ -778,13 +745,6 @@ class DynamoPlannerSweepConfigProvider:
                 ),
                 state={"forced_disabled": True},
             )
-        source = context.traffic.get("source")
-        trace_format = source.get("format") if isinstance(source, Mapping) else None
-        if "enabled" in policies and (
-            trace_format in {"mooncake-delta", "agentic_mooncake"}
-            or (trace_format == "dynamo" and _dynamo_trace_is_agentic(context.traffic))
-        ):
-            raise ValueError(f"{trace_format} requires planner.policy=disabled")
         normalized = public.model_dump(mode="python", exclude_none=True)
         normalized_space = PlannerSearchSpace.model_validate(normalized)
         plan = self.generate_search_space(normalized, context.sweep)
@@ -1021,6 +981,9 @@ class DynamoPlannerSweepConfigProvider:
             return AdapterReplaySpec(
                 config=({"policy": "disabled"} if public_schema else candidate_config)
             )
+        candidate_config[
+            "max_throughput_scaling_replicas"
+        ] = space.max_throughput_scaling_replicas
 
         if scaling["enable_throughput_scaling"]:
             fpm_entry = selection["fpm_sampling"]

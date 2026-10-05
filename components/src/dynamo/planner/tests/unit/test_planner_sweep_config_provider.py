@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import json
 import warnings
 from dataclasses import replace
 
@@ -418,6 +417,7 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
         "enable_load_scaling": False,
         "throughput_adjustment_interval_seconds": 180,
         "load_adjustment_interval_seconds": 5,
+        "max_throughput_scaling_replicas": 8,
         "max_num_fpm_samples": 128,
         "fpm_sample_bucket_size": 64,
         "load_predictor": "constant",
@@ -450,6 +450,7 @@ def test_custom_float_interval_resolves_predictor_and_preserves_selection() -> N
             "fpm_sampling": {"preset": ["default"]},
             "load_sensitivity": {"preset": ["default"]},
             "load_predictor": {"preset": ["constant_last"]},
+            "max_throughput_scaling_replicas": 3,
         },
         _sweep_context(),
     )
@@ -466,11 +467,13 @@ def test_custom_float_interval_resolves_predictor_and_preserves_selection() -> N
 
     assert replay_spec.config["scaling_policy"] == custom_policy
     assert replay_spec.config["throughput_adjustment_interval_seconds"] == 180
+    assert replay_spec.config["max_throughput_scaling_replicas"] == 3
     assert replay_spec.config["load_predictor"] == "constant"
     planner_config = replay_spec.runtime_hooks[0].config["planner_config"]
     assert isinstance(planner_config, dict)
     assert "scaling_policy" not in planner_config
     assert planner_config["load_predictor"] == "constant"
+    assert planner_config["max_throughput_scaling_replicas"] == 3
 
 
 def test_disaggregated_scaling_preserves_both_engine_gpu_counts() -> None:
@@ -739,13 +742,24 @@ def test_preset_off_rejects_infeasible_recombined_scaling_intervals() -> None:
         adapter.materialize_candidate(plan, selection, _candidate_context())
 
 
-def test_enabled_planner_prediction_keeps_public_config_separate_from_hook() -> None:
+@pytest.mark.parametrize(
+    "trace_format", ["mooncake-delta", "agentic_mooncake", "dynamo", "weka"]
+)
+def test_enabled_planner_prediction_keeps_public_config_separate_from_hook(
+    trace_format,
+) -> None:
     context = PredictionAdapterContext(
         engine={
             "mode": "aggregated",
             "workers": {"aggregated": {"parallelism": {"tensor": 1}}},
         },
-        traffic={},
+        traffic={
+            "source": {
+                "type": "trace",
+                "format": trace_format,
+                "paths": ["unopened.jsonl"],
+            }
+        },
         evaluation={},
     )
     spec = create_provider().compile_prediction(
@@ -794,42 +808,29 @@ def test_static_predictor_fallback_stays_within_configured_preset_list() -> None
     assert plan.state["load_predictor"]["best_by_interval"] == {"180": "arima_raw"}
 
 
-def test_native_dynamo_agentic_trace_is_detected_after_payload_header(tmp_path) -> None:
-    trace = tmp_path / "trace.jsonl"
-    trace.write_text(
-        json.dumps({"event_type": "request_payload"})
-        + "\n"
-        + json.dumps(17)
-        + "\n"
-        + json.dumps({"event_type": "request_end", "request": {}})
-        + "\n"
-        + json.dumps(
-            {
-                "event": {
-                    "event_type": "request_end",
-                    "agent_context": {"session_id": "s"},
+@pytest.mark.parametrize(
+    "trace_format", ["mooncake-delta", "agentic_mooncake", "dynamo", "weka"]
+)
+def test_enabled_planner_recommendation_accepts_native_trace_formats(
+    trace_format,
+) -> None:
+    plan = create_provider().compile_recommendation(
+        {"policy": "enabled", "scaling_policy": {"preset": ["load_180_5"]}},
+        RecommendationAdapterContext(
+            engine={},
+            traffic={
+                "source": {
+                    "type": "trace",
+                    "format": trace_format,
+                    "paths": ["unopened.jsonl"],
                 }
-            }
-        )
-        + "\n"
+            },
+            evaluation={},
+            optimization={"target": "throughput"},
+            sweep=_sweep_context(target="throughput"),
+        ),
     )
-    with pytest.raises(ValueError, match=r"planner\.policy=disabled"):
-        create_provider().compile_recommendation(
-            {"policy": "enabled"},
-            RecommendationAdapterContext(
-                engine={},
-                traffic={
-                    "source": {
-                        "type": "trace",
-                        "format": "dynamo",
-                        "paths": [str(trace)],
-                    }
-                },
-                evaluation={},
-                optimization={"target": "throughput"},
-                sweep=_sweep_context(target="throughput"),
-            ),
-        )
+    assert plan.fragment.choices_by_branch["agg"]["policy"] == ["enabled"]
 
 
 def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:
