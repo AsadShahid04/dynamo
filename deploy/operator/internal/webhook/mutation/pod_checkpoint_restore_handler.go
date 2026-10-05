@@ -308,6 +308,32 @@ func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 		return nil, err
 	}
 
+	// Add artifact validator init container to fail fast if checkpoint artifact is missing.
+	// This prevents indefinite hangs when a PodSnapshot shows Ready=true but its artifact
+	// has been deleted from the PVC-backed checkpoint store.
+	podTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: shaped.ObjectMeta,
+		Spec:       shaped.Spec,
+	}
+	checkpointStorePath := h.config.Checkpoint.CheckpointStorePath
+	if checkpointStorePath == "" {
+		checkpointStorePath = checkpoint.DefaultCheckpointStorePath
+	}
+	validatorImage := h.config.Checkpoint.ValidatorImage
+	if validatorImage == "" {
+		// Fall back to a minimal image if not configured
+		validatorImage = "busybox:1.36"
+	}
+	if err := checkpoint.EnsureArtifactValidatorInitContainer(
+		podTemplate,
+		snapshotName,
+		checkpointStorePath,
+		validatorImage,
+	); err != nil {
+		return nil, fmt.Errorf("add artifact validator init container: %w", err)
+	}
+	shaped.Spec = podTemplate.Spec
+
 	// Candidate-only annotations must not survive onto the restore target. The
 	// standalone Snapshot annotations emitted by the builder are the wire API.
 	removeRestoreCandidateAnnotations(shaped.Annotations)

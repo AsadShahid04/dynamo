@@ -355,6 +355,12 @@ type CheckpointConfiguration struct {
 	// restore pods. A nil value means "use the default profile"; set
 	// Seccomp.Disabled=true to disable seccomp injection entirely.
 	Seccomp *CheckpointSeccompConfiguration `json:"seccomp,omitempty"`
+	// CheckpointStorePath is the path where checkpoint artifacts are stored in the PVC.
+	// Empty uses the default "/checkpoint-store".
+	CheckpointStorePath string `json:"checkpointStorePath,omitempty"`
+	// ValidatorImage is the container image to use for the checkpoint artifact validator init container.
+	// Empty uses "busybox:1.36".
+	ValidatorImage string `json:"validatorImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied
