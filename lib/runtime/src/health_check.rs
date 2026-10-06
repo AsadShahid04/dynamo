@@ -696,6 +696,87 @@ mod push_handler_notify_tests {
             "successful chunks should set Ready despite trailing error",
         );
     }
+
+    // =================================================================
+    // Test 6: Engine streaming but publish fails → Ready (fix for #15707)
+    // Under overload, clients disconnect before the engine produces chunks.
+    // The engine is still making progress, so the worker must not be marked idle.
+    // This test simulates that by having the receiver drop before the pump
+    // attempts to send, forcing publish to fail. The notifier should still
+    // fire because the engine yielded non-error chunks.
+    // =================================================================
+    #[tokio::test]
+    async fn test_engine_streaming_publish_fails_still_notifies() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.publish_fails_but_engine_ok";
+
+        // Canary engine returns errors, so Ready can only come from notification
+        let notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        let ingress = create_ingress(MockStreamingEngine::success(5), notifier.clone());
+        start_manager(&drt, 500).await;
+
+        // Set up a request, but drop the receiver BEFORE any chunk is sent,
+        // simulating the client disconnecting. This will cause all publish
+        // attempts to fail.
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (server, connection_info) = setup_tcp_receiver(&request_id).await;
+        let payload = encode_request(
+            &request_id,
+            connection_info,
+            &serde_json::json!({"prompt": "test"}),
+        );
+
+        // Drop the server immediately, so the receiver is gone when pump tries to send
+        drop(server);
+
+        let result = ingress.handle_payload(payload, Some(request_id)).await;
+        // handle_payload should succeed (it doesn't fail on publish errors)
+        assert!(result.is_ok(), "handle_payload should not fail on publish errors");
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // The engine yielded chunks even though publish failed, so the notifier
+        // should have fired and the status should be Ready.
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "engine streaming with failed publish should still notify and set Ready",
+        );
+    }
+
+    // =================================================================
+    // Test 7: Engine yields nothing → canary fires → NotReady
+    // Verifies that a genuinely stalled engine (produces no chunks) still
+    // allows the canary to detect the problem and mark the endpoint unhealthy.
+    // =================================================================
+    #[tokio::test]
+    async fn test_stalled_engine_canary_detects_unhealthy() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.stalled_engine";
+
+        // Engine that yields zero chunks (simulates a stalled engine)
+        let notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        let ingress = create_ingress(MockStreamingEngine::success(0), notifier);
+        start_manager(&drt, 50).await;
+
+        send_request(&ingress).await;
+        // Wait for canary to fire
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // No chunks produced, so no notifications. Canary should fire but
+        // the canary engine returns errors, so status stays NotReady.
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "stalled engine should allow canary to detect unhealthiness",
+        );
+    }
 }
 
 // ===============================

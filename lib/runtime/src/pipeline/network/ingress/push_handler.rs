@@ -192,6 +192,15 @@ where
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
+            // Notify BEFORE attempting to publish: a failed publish does not mean
+            // the engine stopped producing. Under overload, clients time out and
+            // disconnect, but as long as the engine stream yields non-error chunks,
+            // the worker is making progress and must not be considered idle.
+            if !is_error {
+                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                    notifier.notify_one();
+                }
+            }
             if (publisher.send(resp_bytes).await).is_err() {
                 send_complete_final = false;
                 if context.is_stopped() {
@@ -217,12 +226,6 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
