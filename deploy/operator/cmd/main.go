@@ -62,7 +62,8 @@ import (
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
+	internalcert 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/configmapcache"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
@@ -272,6 +273,10 @@ func main() {
 	}
 	if err := podcache.Configure(&mgrOpts.Cache); err != nil {
 		setupLog.Error(err, "unable to configure Pod cache")
+		os.Exit(1)
+	}
+	if err := configmapcache.Configure(&mgrOpts.Cache); err != nil {
+		setupLog.Error(err, "unable to configure ConfigMap cache")
 		os.Exit(1)
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)

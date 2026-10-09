@@ -576,7 +576,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateProfilingSubPhase(
 	outputCMName := getOutputConfigMapName(dgdr)
 
 	cm := &corev1.ConfigMap{}
-	if err := r.Get(ctx, types.NamespacedName{
+	if err := r.APIReader.Get(ctx, types.NamespacedName{
 		Name: outputCMName, Namespace: dgdr.Namespace,
 	}, cm); err != nil {
 		return nil // No output ConfigMap yet — skip
@@ -630,7 +630,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) checkProfilerFailureInConfigMap
 ) (bool, string, error) {
 	outputCMName := getOutputConfigMapName(dgdr)
 	cm := &corev1.ConfigMap{}
-	if err := r.Get(ctx, types.NamespacedName{
+	if err := r.APIReader.Get(ctx, types.NamespacedName{
 		Name: outputCMName, Namespace: dgdr.Namespace,
 	}, cm); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -2205,7 +2205,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	// Read the generated spec from ConfigMap (created by sidecar)
 	outputConfigMapName := getOutputConfigMapName(dgdr)
 	cm := &corev1.ConfigMap{}
-	err := r.Get(ctx, types.NamespacedName{
+	err := r.APIReader.Get(ctx, types.NamespacedName{
 		Name:      outputConfigMapName,
 		Namespace: dgdr.Namespace,
 	}, cm)
