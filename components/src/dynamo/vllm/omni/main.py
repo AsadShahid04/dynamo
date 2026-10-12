@@ -65,6 +65,58 @@ def _register_lora_engine_routes(runtime, handler) -> None:
     )
 
 
+def _get_omni_model_registration_path(config: OmniConfig, engine_client) -> str:
+    """Get the model path to use for Omni register_model().
+
+    When config.model is an object-storage URI (s3://, gs://, az://), vLLM Omni's
+    AsyncOmni internally calls maybe_pull_model_tokenizer_for_runai, which downloads
+    metadata to a local temp dir. For text/audio stages, AsyncOmni stores the
+    resolved local path in its internal stage configs.
+
+    Try to extract the resolved local path from the engine if available; otherwise
+    fall back to config.model (the original path/URI). Image/video stages may not
+    have a text-stage config, so the fallback is safe for those modes.
+
+    Args:
+        config: Parsed OmniConfig.
+        engine_client: The AsyncOmni engine instance.
+
+    Returns:
+        The model path to pass to register_model().
+    """
+    # First check if the engine has a vllm_config or model_config we can inspect
+    # (AsyncOmni may expose this through a property or stage config).
+    if hasattr(engine_client, "vllm_config"):
+        vllm_config = engine_client.vllm_config
+        # Same logic as main.py's _register_model_source_path
+        if hasattr(vllm_config, "model_config") and getattr(
+            vllm_config.model_config, "model_weights", ""
+        ):
+            logger.debug(
+                "Omni object-storage model: using resolved local path %s for registration",
+                vllm_config.model_config.model,
+            )
+            return vllm_config.model_config.model
+
+    # For multi-stage Omni, check if any text stage has a resolved model path
+    if hasattr(engine_client, "stages"):
+        for stage in engine_client.stages:
+            if hasattr(stage, "vllm_config"):
+                vllm_config = stage.vllm_config
+                if hasattr(vllm_config, "model_config") and getattr(
+                    vllm_config.model_config, "model_weights", ""
+                ):
+                    logger.debug(
+                        "Omni object-storage model: using resolved local path %s from stage for registration",
+                        vllm_config.model_config.model,
+                    )
+                    return vllm_config.model_config.model
+
+    # Fall back to config.model (works for local paths, HF names, and when object
+    # storage wasn't used or we can't inspect the engine).
+    return config.model
+
+
 async def init_omni(
     runtime: DistributedRuntime, config: OmniConfig, shutdown_event: asyncio.Event
 ):
@@ -137,12 +189,17 @@ async def init_omni(
     if model_type is None:
         model_type = ModelType.Images
 
+    # Get the model path to register. For object-storage URIs, use the resolved
+    # local path that vLLM Omni downloaded metadata to, not the original s3://
+    # URI (which would fail ModelExpress resolution).
+    model_path = _get_omni_model_registration_path(config, handler.engine_client)
+
     try:
         await register_model(
             ModelInput.Text,
             model_type,
             generate_endpoint,
-            config.model,
+            model_path,
             config.served_model_name,
             kv_cache_block_size=config.engine_args.block_size,
             # Omni workers serve the full multi-stage pipeline behind one
@@ -219,6 +276,9 @@ async def worker():
 
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
+
+    # Function-local import to avoid loading engine deps at module scope
+    from dynamo.vllm.main import should_prefetch_model
 
     if should_prefetch_model(config):
         await fetch_model(config.model)
