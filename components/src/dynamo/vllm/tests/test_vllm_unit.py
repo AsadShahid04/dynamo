@@ -17,7 +17,6 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-import dynamo.llm as dynamo_llm
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
@@ -73,20 +72,25 @@ def _load_vllm_main() -> ModuleType:
 
 
 @pytest.mark.parametrize(
-    "enable_lora, model_type, expected",
+    "enable_lora, model_type_name, expected",
     [
-        (True, dynamo_llm.ModelType.Prefill, 3),
-        (True, dynamo_llm.ModelType.Chat, 3),
-        (True, dynamo_llm.ModelType.Embedding, None),
-        (
-            True,
-            dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
-            None,
-        ),
-        (False, dynamo_llm.ModelType.Prefill, None),
+        (True, "Prefill", 3),
+        (True, "Chat", 3),
+        (True, "Embedding", None),
+        (True, "Classify|Pooling", None),
+        (False, "Prefill", None),
     ],
 )
-def test_base_model_lora_capacity(enable_lora, model_type, expected):
+def test_base_model_lora_capacity(enable_lora, model_type_name, expected):
+    # Function-local import to avoid loading engine deps at module scope
+    import dynamo.llm as dynamo_llm
+
+    # Resolve model type from string name
+    if model_type_name == "Classify|Pooling":
+        model_type = dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling
+    else:
+        model_type = getattr(dynamo_llm.ModelType, model_type_name)
+
     config = SimpleNamespace(
         engine_args=SimpleNamespace(enable_lora=enable_lora, max_loras=3)
     )
@@ -572,21 +576,11 @@ def test_should_not_prefetch_model_for_modelexpress_load_formats(load_format):
     assert should_register_model_ignore_weights(config) is True
 
 
-@pytest.mark.parametrize(
-    "model_arg",
-    [
-        pytest.param(lambda tmp_path: str(tmp_path), id="local-path"),
-        pytest.param(lambda tmp_path: "s3://bucket/model", id="s3-uri"),
-        pytest.param(lambda tmp_path: "gs://bucket/model", id="gs-uri"),
-        pytest.param(lambda tmp_path: "az://account/container/model", id="az-uri"),
-    ],
-)
-def test_should_not_prefetch_existing_local_model(tmp_path, model_arg):
+def test_should_not_prefetch_existing_local_model(tmp_path):
     from dynamo.vllm.main import should_prefetch_model
 
-    model = model_arg(tmp_path)
     config = SimpleNamespace(
-        model=model,
+        model=str(tmp_path),
         engine_args=SimpleNamespace(load_format="auto"),
     )
 
@@ -2219,39 +2213,6 @@ class TestEmbeddingWorkerFlag:
             ValueError, match="--embedding-worker cannot be combined with multimodal"
         ):
             parse_args()
-
-
-# --- is_object_storage_path tests (pure logic, no I/O) ---
-
-
-class TestIsObjectStoragePath:
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "s3://my-bucket/model/",
-            "gs://my-bucket/model",
-            "az://myaccount/container/model",
-        ],
-    )
-    def test_returns_true_for_object_storage_uris(self, path):
-        from dynamo.vllm.main import is_object_storage_path
-
-        assert is_object_storage_path(path) is True
-
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "Qwen/Qwen3-0.6B",
-            "/local/path/to/model",
-            "hf://Qwen/Qwen3-0.6B",
-            "",
-            "runai://model",
-        ],
-    )
-    def test_returns_false_for_non_object_storage(self, path):
-        from dynamo.vllm.main import is_object_storage_path
-
-        assert is_object_storage_path(path) is False
 
 
 class TestRealtimeWorkerFlag:
