@@ -19,23 +19,34 @@ package defaulting
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	admissionv1 "k8s.io/api/admission/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// admissionCtx builds a context carrying an admission request for the given operation.
-func admissionCtx(op admissionv1.Operation) context.Context {
-	return admission.NewContextWithRequest(context.Background(), admission.Request{
+// admissionCtx builds a context carrying an admission request for the given operation and kind.
+func admissionCtx(op admissionv1.Operation, kind schema.GroupVersionKind) context.Context {
+	ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: op,
+			Kind: metav1.GroupVersionKind{
+				Group:   kind.Group,
+				Version: kind.Version,
+				Kind:    kind.Kind,
+			},
 		},
 	})
+	return features.WithGate(ctx, features.Defaults())
 }
 
 func TestDGDDefaulter_Default(t *testing.T) {
@@ -45,15 +56,15 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		name            string
 		operatorVersion string
 		ctx             context.Context
-		dgd             *nvidiacomv1alpha1.DynamoGraphDeployment
+		dgd             *nvidiacomv1beta1.DynamoGraphDeployment
 		wantAnnotation  string
 		wantErr         bool
 	}{
 		{
 			name:            "CREATE stamps operator version on new DGD without annotations",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
-			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -64,8 +75,8 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "CREATE stamps operator version on DGD with existing annotations",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
-			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -77,10 +88,10 @@ func TestDGDDefaulter_Default(t *testing.T) {
 			wantAnnotation: testVersion,
 		},
 		{
-			name:            "CREATE does not overwrite pre-existing origin version",
+			name:            "CREATE overwrites user-supplied origin version",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
-			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -89,13 +100,13 @@ func TestDGDDefaulter_Default(t *testing.T) {
 					},
 				},
 			},
-			wantAnnotation: "0.7.0",
+			wantAnnotation: testVersion,
 		},
 		{
 			name:            "UPDATE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update),
-			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -106,8 +117,8 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE preserves existing annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update),
-			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -121,8 +132,8 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "DELETE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Delete),
-			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+			ctx:             admissionCtx(admissionv1.Delete, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
+			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -131,16 +142,17 @@ func TestDGDDefaulter_Default(t *testing.T) {
 			wantAnnotation: "",
 		},
 		{
-			name:            "no admission request in context skips defaulting gracefully",
+			name:            "no admission request in context fails closed",
 			operatorVersion: testVersion,
 			ctx:             context.Background(),
-			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
 				},
 			},
 			wantAnnotation: "",
+			wantErr:        true,
 		},
 	}
 
@@ -171,38 +183,38 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 	tests := []struct {
 		name         string
 		op           admissionv1.Operation
-		services     map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		components   []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 		wantReplicas map[string]int32
 	}{
 		{
 			name: "CREATE defaults nil replicas to 1",
 			op:   admissionv1.Create,
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"Frontend":   {Replicas: nil},
-				"VllmWorker": {Replicas: ptr.To(int32(3))},
-				"NilService": {Replicas: nil},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Frontend", Replicas: nil},
+				{ComponentName: "worker", Replicas: ptr.To(int32(3))},
+				{ComponentName: "NewComponent", Replicas: nil},
 			},
 			wantReplicas: map[string]int32{
-				"Frontend":   1,
-				"VllmWorker": 3,
-				"NilService": 1,
+				"Frontend":     1,
+				"worker":       3,
+				"NewComponent": 1,
 			},
 		},
 		{
 			name: "UPDATE defaults nil replicas to 1",
 			op:   admissionv1.Update,
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"NewService": {Replicas: nil},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "NewComponent", Replicas: nil},
 			},
 			wantReplicas: map[string]int32{
-				"NewService": 1,
+				"NewComponent": 1,
 			},
 		},
 		{
 			name: "does not overwrite explicit replicas",
 			op:   admissionv1.Create,
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"Worker": {Replicas: ptr.To(int32(5))},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(5))},
 			},
 			wantReplicas: map[string]int32{
 				"Worker": 5,
@@ -211,45 +223,464 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 		{
 			name: "preserves explicit zero replicas",
 			op:   admissionv1.Create,
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"Idle": {Replicas: ptr.To(int32(0))},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Idle", Replicas: ptr.To(int32(0))},
 			},
 			wantReplicas: map[string]int32{
 				"Idle": 0,
 			},
-		},
-		{
-			name: "nil service pointer in map is safe",
-			op:   admissionv1.Create,
-			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"Ghost": nil,
-			},
-			wantReplicas: map[string]int32{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defaulter := NewDGDDefaulter("0.9.0")
-			dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: tt.services,
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					Components: tt.components,
 				},
 			}
 
-			if err := defaulter.Default(admissionCtx(tt.op), dgd); err != nil {
+			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 
 			for name, want := range tt.wantReplicas {
-				svc := dgd.Spec.Services[name]
-				if svc.Replicas == nil {
-					t.Errorf("service %q: replicas is nil, want %d", name, want)
+				component := dgd.GetComponentByName(name)
+				if component == nil {
+					t.Fatalf("component %q not found", name)
+				}
+				if component.Replicas == nil {
+					t.Errorf("component %q: replicas is nil, want %d", name, want)
 					continue
 				}
-				if *svc.Replicas != want {
-					t.Errorf("service %q: replicas = %d, want %d", name, *svc.Replicas, want)
+				if *component.Replicas != want {
+					t.Errorf("component %q: replicas = %d, want %d", name, *component.Replicas, want)
+				}
+			}
+		})
+	}
+}
+
+func TestDGDDefaulter_DefaultsMultinodeRoleReplicas(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
+					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+						{Name: nvidiacomv1beta1.ComponentRoleLeader},
+						{Name: nvidiacomv1beta1.ComponentRoleWorker},
+					},
+				},
+			},
+		},
+	}
+
+	defaulter := NewDGDDefaulter("0.9.0")
+	if err := defaulter.Default(admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+
+	roles := dgd.Spec.Components[0].Roles
+	if got := ptr.Deref(roles[0].Replicas, 0); got != 1 {
+		t.Fatalf("leader replicas = %d, want 1", got)
+	}
+	if got := ptr.Deref(roles[1].Replicas, 0); got != 3 {
+		t.Fatalf("worker replicas = %d, want 3", got)
+	}
+}
+
+func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
+	t.Log("Build a DGD with omitted targets at every supported provider context")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			ProviderOverride: providerOverrideForDefaulting(`{"spec":{"template":{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}}}`),
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName:    "frontend",
+					ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
+				},
+				{
+					ComponentName:    "worker",
+					ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`),
+					Multinode:        &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+						{
+							Name:             nvidiacomv1beta1.ComponentRoleLeader,
+							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
+						},
+						{
+							Name:             nvidiacomv1beta1.ComponentRoleWorker,
+							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
+						},
+					},
+				},
+			},
+		},
+	}
+	ctx := admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+	ctx = features.WithGate(ctx, features.Gates{Grove: true})
+
+	t.Log("Default the provider targets from workload pathway, scope, and component shape")
+	if err := NewDGDDefaulter("0.9.0").Default(ctx, dgd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+
+	t.Log("Verify each context received its stable provider target")
+	if got := dgd.Spec.ProviderOverride.Target; got != provideroverride.TargetPodCliqueSet {
+		t.Errorf("root target = %q, want %q", got, provideroverride.TargetPodCliqueSet)
+	}
+	if got := dgd.Spec.Components[0].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+		t.Errorf("single-node component target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
+	}
+	multinode := dgd.Spec.Components[1]
+	if got := multinode.ProviderOverride.Target; got != provideroverride.TargetPodCliqueScalingGroupConfig {
+		t.Errorf("multinode component target = %q, want %q", got, provideroverride.TargetPodCliqueScalingGroupConfig)
+	}
+	if got := multinode.Roles[0].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+		t.Errorf("leader target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
+	}
+	if got := multinode.Roles[1].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+		t.Errorf("worker target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
+	}
+}
+
+func providerOverrideForDefaulting(value string) *nvidiacomv1beta1.ProviderOverride {
+	return &nvidiacomv1beta1.ProviderOverride{
+		APIVersion: provideroverride.GroveAPIVersion,
+		Value:      apiextensionsv1.JSON{Raw: []byte(value)},
+	}
+}
+
+func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
+	tests := []struct {
+		name             string
+		version          string
+		wantNative       map[string]int32
+		wantOverrideRaw  map[string]string
+		op               admissionv1.Operation
+		groveEnabled     bool
+		annotations      map[string]string
+		components       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+		wantMinAvailable map[string]*int32
+		wantProvider     string
+		wantUnselected   bool
+	}{
+		{
+			name:         "CREATE defaults nil replicas to minAvailable 1 on Grove pathway",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: nil},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "CREATE ignores a user-supplied provider and follows routing intent",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				consts.KubeAnnotationEnableGrove:      consts.KubeLabelValueFalse,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+			wantProvider: consts.WorkloadProviderComponent,
+		},
+		{
+			name:         "legacy UPDATE remains unselected for controller adoption",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+			wantUnselected: true,
+		},
+		{
+			name:         "defaults zero replicas to minAvailable 1 on Grove pathway",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Idle", Replicas: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Idle": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "CREATE selects DisaggregatedSet after Grove opt-out",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove:            consts.KubeLabelValueFalse,
+				consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+			wantProvider: consts.WorkloadProviderDisaggregatedSet,
+		},
+		{
+			name:         "preserves explicit minAvailable",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "CREATE preserves explicit zero minAvailable for validation",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(1)), MinAvailable: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(0)),
+			},
+		},
+		{
+			name:         "UPDATE preserves minAvailable when replicas become positive",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "UPDATE preserves minAvailable when replicas become zero",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(0)), MinAvailable: ptr.To(int32(1))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "UPDATE preserves explicit minAvailable away from zero boundary",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(4)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "UPDATE preserves explicit zero minAvailable for validation",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(1)), MinAvailable: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(0)),
+			},
+		},
+		{
+			name:         "does not default minAvailable when operator disables Grove",
+			op:           admissionv1.Create,
+			groveEnabled: false,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+		},
+		{
+			name:         "does not default minAvailable when DGD opts out of Grove",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove: "false",
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+		},
+		{
+			name:         "selected Grove provider remains authoritative when the feature gate is disabled",
+			op:           admissionv1.Update,
+			groveEnabled: false,
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				consts.KubeAnnotationEnableGrove:      consts.KubeLabelValueFalse,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "selected component provider remains authoritative when Grove is enabled",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+			},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+		},
+		{
+			name:    "new Grove graph resolves minimum one without materializing P and D overrides",
+			version: "1.6.0", op: admissionv1.Create, groveEnabled: true,
+			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "P"}, {ComponentName: "D", Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}}},
+			wantMinAvailable: map[string]*int32{"P": nil, "D": nil},
+		},
+		{
+			name:    "legacy value on P preserves legacy defaulting for D in a new graph",
+			version: "1.6.0", op: admissionv1.Create, groveEnabled: true,
+			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "P", MinAvailable: ptr.To(int32(2)), Replicas: ptr.To(int32(4))}, {ComponentName: "D"}},
+			wantMinAvailable: map[string]*int32{"P": ptr.To(int32(2)), "D": ptr.To(int32(1))},
+		},
+		{
+			name:    "operator upgrade preserves old defaulted fields",
+			version: "1.6.0", op: admissionv1.Update, groveEnabled: true,
+			annotations:      map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0"},
+			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "P", MinAvailable: ptr.To(int32(1))}, {ComponentName: "D", MinAvailable: ptr.To(int32(1))}},
+			wantMinAvailable: map[string]*int32{"P": ptr.To(int32(1)), "D": ptr.To(int32(1))},
+		},
+		{
+			name:    "native minimum selects the native API form without recreating legacy defaults",
+			version: "1.6.0", op: admissionv1.Update, groveEnabled: true,
+			annotations:      map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0"},
+			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "P", Replicas: ptr.To(int32(4)), ProviderOverride: providerOverrideForDefaulting(`{"spec":{"minAvailable":2}}`)}, {ComponentName: "D"}},
+			wantMinAvailable: map[string]*int32{"P": nil, "D": nil}, wantNative: map[string]int32{"P": 2},
+		},
+		{
+			name:    "new topology-only override retains opaque topology without gaining minimum",
+			version: "1.6.0", op: admissionv1.Create, groveEnabled: true,
+			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "Worker", ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","newField":{"keep":true}}}`)}},
+			wantMinAvailable: map[string]*int32{"Worker": nil}, wantOverrideRaw: map[string]string{"Worker": `{"topologyConstraint":{"topologyName":"cluster","newField":{"keep":true}}}`},
+		},
+		{
+			name:    "new LPX target and shared draft resolve minimum one without overrides",
+			version: "1.6.0", op: admissionv1.Create, groveEnabled: true,
+			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "draft", ComponentType: nvidiacomv1beta1.ComponentTypeLPX}, {ComponentName: "target", ComponentType: nvidiacomv1beta1.ComponentTypeLPX, Roles: []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLPXConductor}}}},
+			wantMinAvailable: map[string]*int32{"draft": nil, "target": nil},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD and defaulter for the provider-defaulting scenario")
+			version := tt.version
+			if version == "" {
+				version = "0.9.0"
+			}
+			defaulter := NewDGDDefaulter(version)
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test",
+					Namespace:   "default",
+					Annotations: tt.annotations,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					Components: tt.components,
+				},
+			}
+			ctx := admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+			ctx = features.WithGate(ctx, features.Gates{Grove: tt.groveEnabled})
+
+			t.Log("Apply level-based component defaults")
+			if err := defaulter.Default(ctx, dgd); err != nil {
+				t.Fatalf("Default() unexpected error: %v", err)
+			}
+
+			t.Log("Verify provider selection and component minimum availability")
+			if tt.wantProvider != "" {
+				if got := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
+					t.Errorf("workload provider = %q, want %q", got, tt.wantProvider)
+				}
+			}
+			t.Log("Check native availability and defaulting idempotence")
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				want, native := tt.wantNative[component.ComponentName]
+				if !native {
+					if raw, expected := tt.wantOverrideRaw[component.ComponentName]; expected {
+						if component.ProviderOverride == nil || string(component.ProviderOverride.Value.Raw) != raw {
+							t.Fatalf("topology-only override changed for %s", component.ComponentName)
+						}
+					} else if component.ProviderOverride != nil {
+						t.Fatalf("unexpected native override for %s", component.ComponentName)
+					}
+					if component.MinAvailable == nil && provideroverride.EffectiveGroveMinAvailable(component) != 1 {
+						t.Fatalf("omitted native minimum must resolve to one for %s", component.ComponentName)
+					}
+					continue
+				}
+				got, exists := provideroverride.GroveMinAvailable(component.ProviderOverride.Value.Raw)
+				if !exists || got != want {
+					t.Fatalf("native minimum for %s = %d/%t, want %d", component.ComponentName, got, exists, want)
+				}
+			}
+			before := dgd.DeepCopy()
+			if err := defaulter.Default(ctx, dgd); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, dgd) {
+				t.Fatal("defaulting is not idempotent")
+			}
+
+			if tt.wantUnselected {
+				if _, exists := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; exists {
+					t.Errorf("provider annotation was materialized before controller adoption")
+				}
+			}
+			for name, want := range tt.wantMinAvailable {
+				component := dgd.GetComponentByName(name)
+				if component == nil {
+					t.Fatalf("component %q not found", name)
+				}
+				if want == nil {
+					if component.MinAvailable != nil {
+						t.Errorf("component %q: minAvailable = %d, want nil", name, *component.MinAvailable)
+					}
+					continue
+				}
+				if component.MinAvailable == nil {
+					t.Errorf("component %q: minAvailable is nil, want %d", name, *want)
+					continue
+				}
+				if *component.MinAvailable != *want {
+					t.Errorf("component %q: minAvailable = %d, want %d", name, *component.MinAvailable, *want)
 				}
 			}
 		})
