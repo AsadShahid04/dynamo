@@ -572,11 +572,21 @@ def test_should_not_prefetch_model_for_modelexpress_load_formats(load_format):
     assert should_register_model_ignore_weights(config) is True
 
 
-def test_should_not_prefetch_existing_local_model(tmp_path):
+@pytest.mark.parametrize(
+    "model_arg",
+    [
+        pytest.param(lambda tmp_path: str(tmp_path), id="local-path"),
+        pytest.param(lambda tmp_path: "s3://bucket/model", id="s3-uri"),
+        pytest.param(lambda tmp_path: "gs://bucket/model", id="gs-uri"),
+        pytest.param(lambda tmp_path: "az://account/container/model", id="az-uri"),
+    ],
+)
+def test_should_not_prefetch_existing_local_model(tmp_path, model_arg):
     from dynamo.vllm.main import should_prefetch_model
 
+    model = model_arg(tmp_path)
     config = SimpleNamespace(
-        model=str(tmp_path),
+        model=model,
         engine_args=SimpleNamespace(load_format="auto"),
     )
 
@@ -2242,44 +2252,6 @@ class TestIsObjectStoragePath:
         from dynamo.vllm.main import is_object_storage_path
 
         assert is_object_storage_path(path) is False
-
-
-# --- should_prefetch_model tests ---
-
-
-class TestShouldPrefetchModel:
-    def _make_config(self, model: str, load_format: str = "auto") -> SimpleNamespace:
-        engine_args = SimpleNamespace(load_format=load_format)
-        return SimpleNamespace(model=model, engine_args=engine_args)
-
-    def test_local_path_skips_prefetch(self, tmp_path):
-        from dynamo.vllm.main import should_prefetch_model
-
-        config = self._make_config(str(tmp_path))
-        assert should_prefetch_model(config) is False
-
-    @pytest.mark.parametrize(
-        "uri",
-        ["s3://bucket/model", "gs://bucket/model", "az://account/container/model"],
-    )
-    def test_object_storage_uri_skips_prefetch(self, uri):
-        from dynamo.vllm.main import should_prefetch_model
-
-        config = self._make_config(uri)
-        assert should_prefetch_model(config) is False
-
-    def test_hf_model_name_triggers_prefetch(self):
-        from dynamo.vllm.main import should_prefetch_model
-
-        config = self._make_config("Qwen/Qwen3-0.6B")
-        assert should_prefetch_model(config) is True
-
-    @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
-    def test_modelexpress_load_format_skips_prefetch(self, load_format):
-        from dynamo.vllm.main import should_prefetch_model
-
-        config = self._make_config("Qwen/Qwen3-0.6B", load_format=load_format)
-        assert should_prefetch_model(config) is False
 
 
 class TestRealtimeWorkerFlag:
