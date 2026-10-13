@@ -37,9 +37,6 @@ def _snapshot_config(**overrides):
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "encode_endpoint": "",
         "frontend_decoding": False,
-        "tensor_parallel_size": 1,
-        "pipeline_parallel_size": 1,
-        "gpus_per_node": None,
         "has_connector": lambda name: False,
     }
     values.update(overrides)
@@ -51,6 +48,7 @@ def _runtime_config(**overrides):
         "namespace": "checkpoint-ns",
         "discovery_backend": "kubernetes",
         "request_plane": "nats",
+        "response_plane": "tcp",
         "event_plane": None,
     }
     values.update(overrides)
@@ -66,7 +64,7 @@ def _prefetch_config(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_snapshot_config_accepts_single_gpu_aggregated_text_path():
+def test_snapshot_config_accepts_aggregated_text_path():
     _validate_supported_snapshot_config(_snapshot_config())
 
 
@@ -103,9 +101,6 @@ def test_snapshot_prefetch_skips_external_model_loader():
         ),
         ({"encode_endpoint": "dyn://ns.encode.generate"}, "--encode-endpoint"),
         ({"frontend_decoding": True}, "--frontend-decoding"),
-        ({"tensor_parallel_size": 2}, "tensor_parallel_size=2"),
-        ({"pipeline_parallel_size": 2}, "pipeline_parallel_size=2"),
-        ({"gpus_per_node": 2}, "gpus_per_node=2"),
         ({"has_connector": lambda name: name == "kvbm"}, "--connector kvbm"),
     ],
 )
@@ -134,10 +129,13 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
             assert await self.pause_controller.pause(self.engine) is True
             return True
 
-    def fake_create_runtime(discovery_backend, request_plane, event_plane):
+    def fake_create_runtime(
+        discovery_backend, request_plane, event_plane, response_plane="tcp"
+    ):
         assert discovery_backend == "kubernetes"
         assert request_plane == "nats"
         assert event_plane is None
+        assert response_plane == "tcp"
         assert "resume" not in lifecycle_calls
         return created_runtime, object()
 

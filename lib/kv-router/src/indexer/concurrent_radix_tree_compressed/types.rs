@@ -11,13 +11,6 @@ use crate::protocols::*;
 /// Thread-safe shared reference to a Node.
 pub(super) type SharedNode = Arc<Node>;
 
-/// Per-worker block-hash -> node map.
-///
-/// Maps each `ExternalSequenceBlockHash` to the node whose `edge` contains it.
-/// Position within the edge is resolved via `Node::edge_index` (O(1)) rather than
-/// stored here, keeping the map compact and correct across concurrent splits.
-pub(super) type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
-
 #[derive(Clone, Copy)]
 pub(super) enum WorkerRemovalTarget {
     WorkerId(WorkerId),
@@ -97,6 +90,14 @@ pub(super) struct UncoveredParent {
     pub(super) cutoff: usize,
 }
 
+/// The store worker's coverage of a parent hash, read under the node lock.
+pub(super) enum ParentCoverage {
+    Covered,
+    Uncovered(UncoveredParent),
+    /// The hash is not in this edge: the lookup entry is stale after a split.
+    Missing,
+}
+
 pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) sequence: &'a S,
     pub(super) seq_pos: usize,
@@ -108,7 +109,7 @@ pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) scores: &'a mut OverlapScores,
     pub(super) last_matched_hashes:
         Option<&'a mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
-    pub(super) router_hint_root_chain: Option<&'a mut Vec<ExternalSequenceBlockHash>>,
+    pub(super) kv_transfer_chain: Option<&'a mut Vec<ExternalSequenceBlockHash>>,
 }
 
 pub(super) struct FindStepOutcome {
@@ -122,11 +123,6 @@ pub(super) struct FindStepOutcome {
 /// Data returned by a split for deferred lookup updates.
 pub(super) struct SplitLookupData {
     pub(super) suffix: SharedNode,
-}
-
-pub(super) struct RemoveBatchOutcome {
-    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
-    pub(super) unmatched_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
 #[derive(Clone, Copy)]
@@ -172,11 +168,9 @@ pub(super) struct ChildEdgeScan {
     pub(super) shape_version: u64,
     pub(super) edge_len: usize,
     pub(super) match_len: usize,
-    pub(super) block_hash_mismatch: Option<(ExternalSequenceBlockHash, ExternalSequenceBlockHash)>,
 }
 
 pub(super) enum ParentChildPlan {
-    Stale,
     StaleParent { hash: ExternalSequenceBlockHash },
     InteriorParent { shape_version: u64 },
     Descend(SharedNode),
