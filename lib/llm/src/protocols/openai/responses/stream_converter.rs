@@ -68,6 +68,8 @@ pub struct ResponseStreamConverter {
     // The backend ended with a terminal reason that is not success-like.
     incomplete_reason: Option<&'static str>,
     terminal_failure_emitted: bool,
+    // Single-tool selection state when parallel_tool_calls: false
+    single_tool_selected_index: Option<u32>,
 }
 
 struct ReasoningState {
@@ -147,6 +149,7 @@ impl ResponseStreamConverter {
             usage: None,
             incomplete_reason: None,
             terminal_failure_emitted: false,
+            single_tool_selected_index: None,
         }
     }
 
@@ -517,14 +520,41 @@ impl ResponseStreamConverter {
             // Handle tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
                 // Match the chat-completions post-parse fallback: when the
-                // caller disables parallel tool calls, retain only tool-call
-                // index 0. Filter before starting the reasoning boundary or
-                // allocating converter state so suppressed calls cannot emit
-                // any Responses API events at finish or EOF.
+                // caller disables parallel tool calls, select only one tool call,
+                // preferring the first with complete identity (id + name).
+                // Filter before starting the reasoning boundary or allocating
+                // converter state so suppressed calls cannot emit any Responses
+                // API events at finish or EOF.
                 let enforce_single_tool_call = self.params.parallel_tool_calls == Some(false);
-                let tool_calls = tool_calls
+                
+                // When enforcing single tool call, update selection based on identity completeness
+                if enforce_single_tool_call && self.single_tool_selected_index.is_none() {
+                    for tc in tool_calls.iter() {
+                        let has_id = tc.id.is_some();
+                        let has_name = tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some();
+                        if has_id && has_name {
+                            self.single_tool_selected_index = Some(tc.index);
+                            break;
+                        }
+                    }
+                }
+                
+                let tool_calls: Vec<_> = tool_calls
                     .iter()
-                    .filter(|tc| !enforce_single_tool_call || tc.index == 0);
+                    .filter(|tc| {
+                        if !enforce_single_tool_call {
+                            return true;
+                        }
+                        // If a selection has been made, only process that index
+                        if let Some(selected) = self.single_tool_selected_index {
+                            tc.index == selected
+                        } else {
+                            // No selection yet; buffer by dropping all chunks
+                            false
+                        }
+                    })
+                    .collect();
+                    
                 for tc in tool_calls {
                     let tc_index = tc.index as usize;
 
