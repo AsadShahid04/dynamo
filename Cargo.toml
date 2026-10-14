@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/parsers",
     "lib/rl",
     "lib/runtime",
     "lib/tokens",
@@ -70,7 +71,7 @@ dynamo-memory = { path = "lib/memory", version = "1.5.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
 dynamo-protocols = { version = "=5.4.0" }
-dynamo-parsers = { version = "8.1.0" }
+dynamo-parsers = { path = "lib/parsers", version = "8.1.0" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
