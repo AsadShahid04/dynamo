@@ -364,6 +364,11 @@ impl Model {
     /// WorkerSet's needs are ignored (a live sibling of the same type carries
     /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
     /// check: ready iff any worker is live. Empty `wsets` is not ready.
+    ///
+    /// Additionally, for disaggregated deployments: if a decode WorkerSet has
+    /// a PrefillRouter that is not Active, the namespace is not ready. This
+    /// prevents routing to decode-only workers before their prefill peer is
+    /// activated during rolling updates.
     fn evaluate_namespace(&self, wsets: &[Arc<WorkerSet>]) -> NamespaceReadinessEval {
         let units = wsets
             .iter()
@@ -384,8 +389,16 @@ impl Model {
         if eval.has_legacy {
             warn_legacy_readiness_once(&self.name, wsets[0].namespace());
         }
+
+        // Check if any decode WorkerSet has a PrefillRouter that is not Active.
+        // A decode worker with a non-Active PrefillRouter would pass requests
+        // straight through to decode without bootstrap_info, causing failures.
+        let has_inactive_prefill_router = wsets.iter().any(|ws| {
+            ws.has_decode_engine() && ws.prefill_router.as_ref().is_some_and(|pr| !pr.is_active())
+        });
+
         NamespaceReadinessEval {
-            ready: eval.ready,
+            ready: eval.ready && !has_inactive_prefill_router,
             has_legacy: eval.has_legacy,
             legacy_live_workers: eval.legacy_live_workers,
             present: eval.present,
@@ -1217,6 +1230,173 @@ mod tests {
         assert!(
             model.is_displayable(),
             "prefill-router lifecycle must not override registered topology"
+        );
+    }
+
+    // -- Disaggregated PrefillRouter activation gate --
+    //
+    // During rolling updates, a new worker generation's namespace can have
+    // live workers before its PrefillRouter reaches Active. Requests routed
+    // during that window would bypass prefill (no bootstrap_info) and fail
+    // at decode. These tests verify the admission gate blocks selection
+    // until the router is Active.
+
+    /// Build a decode WorkerSet with a Pending (not yet activated) PrefillRouter.
+    /// Simulates the window after discovery registers a worker but before
+    /// the PrefillRouter's background activation task completes.
+    fn make_decode_with_pending_prefill(
+        namespace: &str,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
+        let (tx, rx) = watch::channel(vec![1_u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), "mdc-d".to_string(), card);
+        ws.set_instance_watcher(rx);
+
+        // Attach a chat engine so selection would succeed if readiness passed
+        ws.chat_engine = Some(make_test_chat_engine());
+
+        // Create a PrefillRouter in default Pending state (not yet activated)
+        let pr = PrefillRouter::disabled(
+            std::sync::Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            None,
+        );
+        // PrefillRouter::disabled starts in Pending state, which is what we want
+        ws.prefill_router = Some(pr);
+
+        (Arc::new(ws), tx)
+    }
+
+    #[test]
+    fn disagg_namespace_with_pending_prefill_router_not_ready() {
+        // This is the bug scenario: P+D topology where worker types are
+        // present but the decode's PrefillRouter hasn't activated yet.
+        let model = Model::new("llama".to_string());
+
+        let (prefill, _tx_p) = ws_with_type(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (decode, _tx_d) = make_decode_with_pending_prefill("dynamo");
+
+        model.add_worker_set("dynamo:prefill".to_string(), prefill);
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        // Worker topology complete but PrefillRouter Pending → not ready
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "namespace with Pending PrefillRouter must not be ready"
+        );
+        assert!(
+            model.get_chat_engine().is_err(),
+            "decode with Pending PrefillRouter must not be selectable"
+        );
+    }
+
+    #[test]
+    fn aggregated_workers_without_prefill_router_remain_selectable() {
+        // Aggregated workers run prefill+decode locally and have no PrefillRouter.
+        // The admission gate must not block them.
+        let model = Model::new("llama".to_string());
+        let (agg, _tx) = ws_serving_role(
+            "dynamo",
+            "mdc-a",
+            WorkerType::Aggregated,
+            vec![], // no peers needed
+            vec![1],
+        );
+        model.add_worker_set("dynamo".to_string(), agg);
+
+        assert!(
+            model.is_workers_ready("dynamo"),
+            "aggregated worker must be ready immediately (no prefill router gate)"
+        );
+        assert!(
+            model.get_chat_engine().is_ok(),
+            "aggregated worker must be selectable"
+        );
+    }
+
+    #[test]
+    fn disagg_with_multi_namespace_only_ready_namespace_selected() {
+        // Two P+D namespaces: ns-old has no PrefillRouter (legacy or
+        // aggregated-capable decode), ns-new has a Pending PrefillRouter.
+        // Only ns-old should be selectable.
+        let model = Model::new("llama".to_string());
+
+        // ns-old: P+D pair, decode has no PrefillRouter (legacy path)
+        let (p_old, _tp) = ws_with_type(
+            "ns-old",
+            "mdc-p-old",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (d_old, _td) = ws_serving_role(
+            "ns-old",
+            "mdc-d-old",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("ns-old:prefill".to_string(), p_old);
+        model.add_worker_set("ns-old".to_string(), d_old);
+
+        // ns-new: P+D pair with decode's PrefillRouter Pending
+        let (p_new, _tp2) = ws_with_type(
+            "ns-new",
+            "mdc-p-new",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![3],
+        );
+        let (d_new, _td2) = make_decode_with_pending_prefill("ns-new");
+        model.add_worker_set("ns-new:prefill".to_string(), p_new);
+        model.add_worker_set("ns-new".to_string(), d_new);
+
+        assert!(
+            model.is_workers_ready("ns-old"),
+            "ns-old without PrefillRouter must be ready"
+        );
+        assert!(
+            !model.is_workers_ready("ns-new"),
+            "ns-new with Pending PrefillRouter must not be ready"
+        );
+
+        // Model is servable via ns-old
+        assert!(
+            model.get_chat_engine().is_ok(),
+            "model must be servable via ready namespace ns-old"
+        );
+    }
+
+    #[test]
+    fn decode_with_dead_prefill_router_not_ready() {
+        // A decode WorkerSet whose PrefillRouter was active but then died
+        // (all prefill workers left) should transition to not-ready.
+        let model = Model::new("llama".to_string());
+
+        let (prefill, _tx_p) = ws_with_type(
+            "dynamo",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let decode = make_worker_set_with_dead_prefill("dynamo");
+
+        model.add_worker_set("dynamo:prefill".to_string(), prefill);
+        model.add_worker_set("dynamo".to_string(), decode);
+
+        // Worker topology complete but PrefillRouter Unavailable → not ready
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "namespace with Unavailable (dead) PrefillRouter must not be ready"
         );
     }
 

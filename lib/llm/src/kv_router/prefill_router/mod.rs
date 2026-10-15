@@ -248,6 +248,7 @@ where
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>);
+    fn is_active(&self) -> bool;
 }
 
 impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
@@ -256,6 +257,10 @@ where
 {
     fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>) {
         self.set_target(target);
+    }
+
+    fn is_active(&self) -> bool {
+        self.lifecycle_state() == PrefillLifecycleState::Active
     }
 }
 
