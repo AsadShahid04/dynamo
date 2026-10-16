@@ -2727,6 +2727,11 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 		!p.checkpointInfo.Ready {
 		replicas = 0
 	}
+	// When replicas is 0, minAvailable must also be 0 to satisfy Grove's
+	// validation constraint that minAvailable must not exceed replicas.
+	if replicas == 0 {
+		minAvailable = 0
+	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
 		Name: strings.ToLower(p.r.Name),
@@ -3131,6 +3136,11 @@ func buildGroveScalingGroupConfig(
 	minAvailable := ptr.To(provideroverride.EffectiveGroveMinAvailable(component))
 	if shouldGateGroveScalingGroupReplicas(checkpointInfo) {
 		replicas = ptr.To(int32(0))
+	}
+	// When replicas is 0, minAvailable must also be 0 to satisfy Grove's
+	// validation constraint that minAvailable must not exceed replicas.
+	if replicas != nil && *replicas == 0 {
+		minAvailable = ptr.To(int32(0))
 	}
 	pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 		Name:               strings.ToLower(componentName),

@@ -9616,14 +9616,14 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 	require.NotNil(t, pcsg.Replicas)
 	assert.EqualValues(t, 0, *pcsg.Replicas)
 	require.NotNil(t, pcsg.MinAvailable)
-	assert.EqualValues(t, 1, *pcsg.MinAvailable)
+	assert.EqualValues(t, 0, *pcsg.MinAvailable, "minAvailable must be 0 when replicas is 0 to satisfy Grove validation")
 	for _, clique := range got.Spec.Template.Cliques {
 		if strings.Contains(clique.Name, "gms") {
 			continue
 		}
 		assert.EqualValues(t, 0, clique.Spec.Replicas, "clique %q should be gated", clique.Name)
 		require.NotNil(t, clique.Spec.MinAvailable)
-		assert.EqualValues(t, 1, *clique.Spec.MinAvailable, "clique %q should keep its configured minAvailable", clique.Name)
+		assert.EqualValues(t, 0, *clique.Spec.MinAvailable, "clique %q minAvailable must be 0 when replicas is 0", clique.Name)
 	}
 }
 
@@ -9687,6 +9687,33 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 			wantScalingGroup: true,
 			wantMinAvailable: int32(1),
 		},
+		{
+			name: "standalone pod clique with replicas 0 sets minAvailable to 0",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(0)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+			},
+			wantClique:       true,
+			wantMinAvailable: int32(0),
+		},
+		{
+			name: "pod clique scaling group with replicas 0 sets minAvailable to 0",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(0)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+			wantScalingGroup: true,
+			wantMinAvailable: int32(0),
+		},
 	}
 
 	for _, tt := range tests {
@@ -9721,6 +9748,95 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 				require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
 				require.NotNil(t, got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
 				assert.EqualValues(t, tt.wantMinAvailable, *got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
+			}
+		})
+	}
+}
+
+// TestGenerateGrovePodCliqueSet_ZeroReplicasCreation validates that creating
+// a Grove-backed DGD with replicas: 0 generates a valid PodCliqueSet that
+// passes Grove's validation (replicas and minAvailable both 0). This covers
+// ai-dynamo/dynamo#16547.
+func TestGenerateGrovePodCliqueSet_ZeroReplicasCreation(t *testing.T) {
+	tests := []struct {
+		name      string
+		component *v1alpha1.DynamoComponentDeploymentSharedSpec
+	}{
+		{
+			name: "frontend with replicas 0",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				Replicas:      ptr.To(int32(0)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "0"},
+				},
+			},
+		},
+		{
+			name: "multinode decode worker with replicas 0",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeDecode,
+				Replicas:      ptr.To(int32(0)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+		},
+		{
+			name: "multinode decode worker with replicas 0 and explicit minAvailable",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeDecode,
+				Replicas:      ptr.To(int32(0)),
+				MinAvailable:  ptr.To(int32(1)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": tt.component,
+					},
+				},
+			}
+
+			converted := betaDGD(t, dgd)
+			got, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				converted, nil,
+				&configv1alpha1.OperatorConfiguration{},
+				&controller_common.RuntimeConfig{},
+				nil, nil, nil, nil, false, nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+
+			t.Log("Verify that all generated Grove resources have consistent replicas and minAvailable")
+			// Check standalone cliques (not in a scaling group)
+			for _, clique := range got.Spec.Template.Cliques {
+				if clique.Spec.Replicas == 0 {
+					require.NotNil(t, clique.Spec.MinAvailable)
+					assert.EqualValues(t, 0, *clique.Spec.MinAvailable,
+						"clique %q minAvailable must be 0 when replicas is 0 (Grove validation)", clique.Name)
+				}
+			}
+
+			// Check scaling groups
+			for _, pcsg := range got.Spec.Template.PodCliqueScalingGroupConfigs {
+				if pcsg.Replicas != nil && *pcsg.Replicas == 0 {
+					require.NotNil(t, pcsg.MinAvailable)
+					assert.EqualValues(t, 0, *pcsg.MinAvailable,
+						"PCSG %q minAvailable must be 0 when replicas is 0 (Grove validation)", pcsg.Name)
+				}
 			}
 		})
 	}
