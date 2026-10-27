@@ -27,8 +27,8 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
-    RawKvEventSink, ReplayRequestContext,
+    DirectRequest, DpLoadBalanceMethod, EngineType, KvCacheEventSink, KvEventPublishers,
+    MockerConfig, RawKvEvent, RawKvEventSink, ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -373,20 +373,83 @@ impl MockerExecutionContext {
         }
     }
 
-    fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
+    async fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> Result<u32> {
         if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
-            return dp_rank;
+            return Ok(dp_rank);
         }
 
-        // SGLang's default auto policy follows the bootstrap room on prefill workers.
-        if self.engine_args.backend == EngineType::Sglang
-            && self.engine_args.is_prefill()
-            && let Some(bootstrap_info) = request.bootstrap_info.as_ref()
-        {
-            return (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size)) as u32;
+        let load_balance_method = self.engine_args.runtime.dp_load_balance_method;
+        let is_sglang_prefill =
+            self.engine_args.backend == EngineType::Sglang && self.engine_args.is_prefill();
+
+        // Handle bootstrap room-based methods
+        if matches!(
+            load_balance_method,
+            DpLoadBalanceMethod::Auto | DpLoadBalanceMethod::FollowBootstrapRoom
+        ) {
+            if is_sglang_prefill {
+                if let Some(bootstrap_info) = request.bootstrap_info.as_ref() {
+                    return Ok(
+                        (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size))
+                            as u32,
+                    );
+                }
+
+                // Under follow_bootstrap_room (or auto on prefill), reject requests without bootstrap info
+                if load_balance_method == DpLoadBalanceMethod::FollowBootstrapRoom {
+                    bail!(
+                        "SGLang follow_bootstrap_room requires bootstrap_info; \
+                         do not send requests directly to prefill workers"
+                    );
+                }
+            }
         }
 
-        self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
+        // Handle explicit methods
+        match load_balance_method {
+            DpLoadBalanceMethod::RoundRobin => {
+                Ok(self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed)
+                    % self.engine_args.dp_size)
+            }
+            DpLoadBalanceMethod::TotalRequests | DpLoadBalanceMethod::TotalTokens => {
+                // Get metrics from all engines to find the least loaded rank
+                if let Some(engines) = self.engines.get() {
+                    let mut min_load = u64::MAX;
+                    let mut selected_rank = 0u32;
+
+                    for (rank, engine) in engines.iter().enumerate() {
+                        let metrics = engine.metrics_receiver().borrow().clone();
+                        let load = match load_balance_method {
+                            DpLoadBalanceMethod::TotalRequests => {
+                                metrics.running_requests + metrics.waiting_requests
+                            }
+                            DpLoadBalanceMethod::TotalTokens => {
+                                // Use sglang_cache_total_tokens as a proxy for total tokens load
+                                metrics.sglang_cache_total_tokens
+                            }
+                            _ => unreachable!(),
+                        };
+
+                        if load < min_load {
+                            min_load = load;
+                            selected_rank = rank as u32;
+                        }
+                    }
+
+                    Ok(selected_rank)
+                } else {
+                    // Engines not yet initialized, fall back to round-robin
+                    Ok(self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed)
+                        % self.engine_args.dp_size)
+                }
+            }
+            DpLoadBalanceMethod::Auto | DpLoadBalanceMethod::FollowBootstrapRoom => {
+                // Fall back to round-robin for Auto (non-SGLang-prefill case)
+                // or FollowBootstrapRoom (non-prefill case)
+                Ok(self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed)
+                    % self.engine_args.dp_size)
+            }
+        }
     }
 
     async fn prepare_bootstrap(&self) -> Result<Option<PreparedBootstrap>> {
@@ -868,7 +931,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
         let native_sglang_terminal = native_sglang.is_some();
 
-        let dp_rank = self.resolve_dp_rank(&request);
+        let dp_rank = match self.resolve_dp_rank(&request).await {
+            Ok(rank) => rank,
+            Err(error) => {
+                return Ok(error_stream(
+                    &ctx,
+                    invalid_argument(error.to_string(), error.to_string()),
+                ));
+            }
+        };
 
         // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {
@@ -1542,41 +1613,158 @@ mod tests {
         request
     }
 
-    #[test]
-    fn sglang_prefill_dp_rank_follows_bootstrap_room() {
+    #[tokio::test]
+    async fn sglang_prefill_dp_rank_follows_bootstrap_room() {
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 3);
         for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
             assert_eq!(
-                engine.resolve_dp_rank(&dp_rank_request(Some(room), None)),
+                engine
+                    .resolve_dp_rank(&dp_rank_request(Some(room), None))
+                    .await
+                    .unwrap(),
                 expected,
                 "room={room}"
             );
         }
     }
 
-    #[test]
-    fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
+    #[tokio::test]
+    async fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
         assert_eq!(
-            engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
+            engine
+                .resolve_dp_rank(&dp_rank_request(Some(10), Some(3)))
+                .await
+                .unwrap(),
             3
         );
-        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 0);
+        assert_eq!(
+            engine
+                .resolve_dp_rank(&dp_rank_request(None, None))
+                .await
+                .unwrap(),
+            0
+        );
     }
 
-    #[test]
-    fn dp_rank_other_backends_and_roles_keep_round_robin() {
+    #[tokio::test]
+    async fn dp_rank_other_backends_and_roles_keep_round_robin() {
         for (backend, worker_type) in [
             (EngineType::Sglang, WorkerType::Decode),
             (EngineType::Vllm, WorkerType::Prefill),
         ] {
             let engine = dp_rank_engine(backend, worker_type, 4);
-            let ranks: Vec<_> = [6, 10, 15, 19, 6]
-                .into_iter()
-                .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
-                .collect();
+            let mut ranks = vec![];
+            for room in [6, 10, 15, 19, 6] {
+                ranks.push(
+                    engine
+                        .resolve_dp_rank(&dp_rank_request(Some(room), None))
+                        .await
+                        .unwrap(),
+                );
+            }
             assert_eq!(ranks, [0, 1, 2, 3, 0], "{backend:?} {worker_type:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn dp_rank_explicit_round_robin_ignores_bootstrap_room() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": 3,
+            "engine": { "backend": "sglang", "worker_type": "prefill" },
+            "dynamo": { "dp_load_balance_method": "round_robin" }
+        }))
+        .unwrap();
+        let engine = MockerExecutionContext::new(args);
+
+        let mut ranks = vec![];
+        for room in [0, 10, 20] {
+            ranks.push(
+                engine
+                    .resolve_dp_rank(&dp_rank_request(Some(room), None))
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(ranks, [0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn dp_rank_follow_bootstrap_room_rejects_missing_bootstrap_info() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": 3,
+            "engine": { "backend": "sglang", "worker_type": "prefill" },
+            "dynamo": { "dp_load_balance_method": "follow_bootstrap_room" }
+        }))
+        .unwrap();
+        let engine = MockerExecutionContext::new(args);
+
+        // With bootstrap room it should work
+        assert_eq!(
+            engine
+                .resolve_dp_rank(&dp_rank_request(Some(5), None))
+                .await
+                .unwrap(),
+            2
+        );
+
+        // Without bootstrap room it should error
+        let result = engine.resolve_dp_rank(&dp_rank_request(None, None)).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("follow_bootstrap_room requires bootstrap_info")
+        );
+    }
+
+    #[tokio::test]
+    async fn dp_rank_follow_bootstrap_room_fallback_on_decode() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": 3,
+            "engine": { "backend": "sglang", "worker_type": "decode" },
+            "dynamo": { "dp_load_balance_method": "follow_bootstrap_room" }
+        }))
+        .unwrap();
+        let engine = MockerExecutionContext::new(args);
+
+        // On decode workers, follow_bootstrap_room should fall back to round-robin
+        let mut ranks = vec![];
+        for _ in 0..4 {
+            ranks.push(
+                engine
+                    .resolve_dp_rank(&dp_rank_request(None, None))
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(ranks, [0, 1, 2, 0]);
+    }
+
+    #[tokio::test]
+    async fn dp_rank_auto_fallback_on_missing_bootstrap_info_on_sglang_prefill() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": 3,
+            "engine": { "backend": "sglang", "worker_type": "prefill" },
+            "dynamo": { "dp_load_balance_method": "auto" }
+        }))
+        .unwrap();
+        let engine = MockerExecutionContext::new(args);
+
+        // With bootstrap room it should work
+        assert_eq!(
+            engine
+                .resolve_dp_rank(&dp_rank_request(Some(7), None))
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Without bootstrap room on SGLang prefill with auto, falls back to round-robin (lenient mode)
+        let result = engine.resolve_dp_rank(&dp_rank_request(None, None)).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
     }
 
     #[tokio::test(start_paused = true)]

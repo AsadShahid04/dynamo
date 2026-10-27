@@ -17,6 +17,22 @@ use validator::Validate;
 use crate::common::perf_model::PerfModel;
 use crate::common::protocols::ReasoningConfig;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DpLoadBalanceMethod {
+    Auto,
+    RoundRobin,
+    FollowBootstrapRoom,
+    TotalRequests,
+    TotalTokens,
+}
+
+impl Default for DpLoadBalanceMethod {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MockerRuntimeOptions {
@@ -28,6 +44,7 @@ pub struct MockerRuntimeOptions {
     pub zmq_kv_events_port: Option<u16>,
     pub zmq_replay_port: Option<u16>,
     pub router_queue_policy: Option<RouterQueuePolicy>,
+    pub dp_load_balance_method: DpLoadBalanceMethod,
 }
 
 impl Default for MockerRuntimeOptions {
@@ -41,6 +58,7 @@ impl Default for MockerRuntimeOptions {
             zmq_kv_events_port: None,
             zmq_replay_port: None,
             router_queue_policy: None,
+            dp_load_balance_method: DpLoadBalanceMethod::Auto,
         }
     }
 }
