@@ -9,7 +9,7 @@
 //! The state machine enforces ordered responses:
 //! `RequestHeaders → RequestBody → RequestTrailers → ResponseHeaders → ResponseBody → ResponseTrailers`
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -19,13 +19,17 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
-use crate::picker::{Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage};
+use crate::picker::{
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
+};
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request,
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
+use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
+use serde_json::value::RawValue;
 
 /// State machine phases for the ext_proc stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +225,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         // picker and for the stream-end bookkeeping keyed on the request ID.
         if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
+            // Client-owned routing metadata must not influence selection. A
+            // trusted replacement can only come back through `PickResult`.
+            ctx.request_headers
+                .retain(|(key, _)| !envoy_helpers::is_prefiller_host_port_header(key));
 
             if let Some(id) =
                 envoy_helpers::extract_header_value(header_map, metadata::REQUEST_ID_HEADER_KEY)
@@ -264,6 +272,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             None,
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
         Ok(())
     }
@@ -317,25 +326,37 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             Some(ctx.request_size),
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
 
-        // Inject nvext.token_data into the request body JSON so the backend
-        // skips redundant tokenization. Only the injection path allocates a
-        // new body; forwarding the unchanged body is a cheap `Bytes` clone
-        // (no copy).
-        let forwarded_body: Bytes = if let Some(ref token_ids) = result.token_ids {
-            match inject_token_data(&raw_body, token_ids) {
+        // Only the rewrite path allocates a new body; otherwise the unchanged
+        // body is a cheap `Bytes` clone.
+        let cache_salt = match result.cache_salt_forwarding {
+            CacheSaltForwarding::RawEngine => result.cache_namespace.as_deref(),
+            CacheSaltForwarding::Preserve => None,
+        };
+        let forwarded_body: Bytes = if result.strip_nvext
+            || result.token_ids.is_some()
+            || cache_salt.is_some()
+        {
+            match rewrite_forwarded_body(
+                &raw_body,
+                result.strip_nvext,
+                result.token_ids.as_deref(),
+                cache_salt,
+            ) {
                 Ok(modified) => {
-                    tracing::debug!(
-                        token_count = token_ids.len(),
-                        body_size_before = raw_body.len(),
-                        body_size_after = modified.len(),
-                        "Injected nvext.token_data into request body"
+                    tracing::trace!(
+                        request_id = %ctx.request_id,
+                        strip_nvext = result.strip_nvext,
+                        has_cache_namespace = result.cache_namespace.is_some(),
+                        cache_salt_forwarding = ?result.cache_salt_forwarding,
+                        "Forwarded body with routing extensions"
                     );
                     Bytes::from(modified)
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to inject token_data, forwarding original body");
+                    tracing::warn!(error = %e, "Failed to rewrite request body, forwarding original body");
                     raw_body.clone()
                 }
             }
@@ -834,14 +855,29 @@ fn validate_protocol_config(
     Err(Status::failed_precondition(detail))
 }
 
-/// Inject pre-computed token IDs into the request body JSON as
-/// `nvext.token_data`. This lets the backend skip redundant tokenization.
-fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> {
+/// Rewrite the request body for the backend: drop the client's `nvext`
+/// (`strip_nvext`), add `nvext.token_data` (`token_ids`), and set the tagged
+/// top-level `cache_salt` (`cache_salt`), in that order.
+fn rewrite_forwarded_body(
+    body: &[u8],
+    strip_nvext: bool,
+    token_ids: Option<&[u32]>,
+    cache_salt: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    let Some(token_ids) = token_ids else {
+        return rewrite_top_level(body, strip_nvext, cache_salt);
+    };
+
+    // token_data lives inside `nvext`, so this path needs the parsed tree.
     let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
 
     let obj = parsed
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
+
+    if strip_nvext {
+        obj.remove("nvext");
+    }
 
     let nvext = obj
         .entry("nvext")
@@ -861,7 +897,38 @@ fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> 
         ),
     );
 
+    if let Some(cache_salt) = cache_salt {
+        obj.insert(
+            "cache_salt".to_string(),
+            serde_json::Value::String(tagged_cache_salt(cache_salt)),
+        );
+    }
+
     Ok(serde_json::to_vec(&parsed)?)
+}
+
+/// Strip-and-salt without parsing the body into a `Value` tree: untouched
+/// top-level members are borrowed and re-emitted byte-for-byte.
+fn rewrite_top_level(
+    body: &[u8],
+    strip_nvext: bool,
+    cache_salt: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut members: BTreeMap<String, &RawValue> = serde_json::from_slice(body)?;
+    if strip_nvext {
+        members.remove("nvext");
+    }
+    let salt = cache_salt
+        .map(|salt| serde_json::value::to_raw_value(&tagged_cache_salt(salt)))
+        .transpose()?;
+    if let Some(salt) = &salt {
+        members.insert("cache_salt".to_string(), salt);
+    }
+    Ok(serde_json::to_vec(&members)?)
+}
+
+fn tagged_cache_salt(cache_salt: &str) -> String {
+    format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}")
 }
 
 /// Extract the "model" field from a JSON request body.
@@ -935,9 +1002,13 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
-            PickError::TokenizationFailed(msg) => Self {
+            PickError::InvalidRequest(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
+            },
+            PickError::MetadataHeadersTooLarge(err) => Self {
+                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
@@ -1581,5 +1652,154 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    #[test]
+    fn metadata_headers_too_large_maps_to_431() {
+        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
+            dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
+        ));
+        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
+    }
+
+    /// Cache salt is injected as a top-level field and tagged with the Dynamo
+    /// cache-salt prefix so the backend's KV-event extra_keys carry an
+    /// unambiguous namespace marker.
+    #[test]
+    fn inject_body_extensions_adds_cache_salt() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        let modified = rewrite_forwarded_body(body, false, None, Some("salt-a")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+        assert_eq!(
+            parsed.get("cache_salt").and_then(|v| v.as_str()),
+            Some("dynamo-cache-salt:salt-a")
+        );
+    }
+
+    /// Injecting both token_data and cache_salt preserves existing nvext fields.
+    #[test]
+    fn inject_body_extensions_preserves_existing_fields() {
+        let body = br#"{"model":"m","nvext":{"extra_fields":["engine_data"]}}"#;
+        let modified =
+            rewrite_forwarded_body(body, false, Some(&[10, 20, 30]), Some("salt-b")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+
+        assert_eq!(
+            parsed.get("cache_salt").and_then(|v| v.as_str()),
+            Some("dynamo-cache-salt:salt-b")
+        );
+
+        let nvext = parsed.get("nvext").expect("nvext preserved");
+        assert_eq!(
+            nvext
+                .get("extra_fields")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+        let token_data: Vec<u64> = nvext
+            .get("token_data")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .collect();
+        assert_eq!(token_data, vec![10, 20, 30]);
+    }
+
+    /// Cross-salt isolation: different salts produce different body values.
+    #[test]
+    fn inject_body_extensions_isolates_salts() {
+        let body = br#"{}"#;
+        let a = rewrite_forwarded_body(body, false, None, Some("salt-a")).unwrap();
+        let b = rewrite_forwarded_body(body, false, None, Some("salt-b")).unwrap();
+        let parsed_a: serde_json::Value = serde_json::from_slice(&a).unwrap();
+        let parsed_b: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(parsed_a["cache_salt"], "dynamo-cache-salt:salt-a");
+        assert_eq!(parsed_b["cache_salt"], "dynamo-cache-salt:salt-b");
+        assert_ne!(parsed_a["cache_salt"], parsed_b["cache_salt"]);
+    }
+
+    /// Raw-engine forwarding writes only the top-level `cache_salt`; nvext is
+    /// not read by a raw engine, so a body `nvext.cache_salt` is left untouched
+    /// (Dynamo-runtime backends use `Preserve`, which skips the salt rewrite).
+    #[test]
+    fn inject_body_extensions_leaves_nvext_cache_salt_untouched() {
+        let body = br#"{"nvext":{"cache_salt":"body-salt","extra_fields":["engine_data"]}}"#;
+        let modified =
+            rewrite_forwarded_body(body, false, Some(&[10, 20, 30]), Some("header-salt")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+
+        assert_eq!(parsed["cache_salt"], "dynamo-cache-salt:header-salt");
+
+        let nvext = parsed.get("nvext").expect("nvext preserved");
+        assert_eq!(nvext["cache_salt"], "body-salt");
+
+        let extra_fields = nvext
+            .get("extra_fields")
+            .and_then(|v| v.as_array())
+            .expect("extra_fields preserved");
+        assert_eq!(extra_fields.len(), 1);
+    }
+
+    /// Malformed bodies are rejected rather than silently forwarded unchanged.
+    #[test]
+    fn inject_body_extensions_rejects_non_object_body() {
+        let body = br#"["not", "an", "object"]"#;
+        assert!(rewrite_forwarded_body(body, false, Some(&[1]), Some("salt")).is_err());
+    }
+
+    /// A body with a non-object `nvext` cannot accept token_data.
+    #[test]
+    fn inject_body_extensions_rejects_non_object_nvext() {
+        let body = br#"{"nvext": "bad"}"#;
+        assert!(rewrite_forwarded_body(body, false, Some(&[1]), None).is_err());
+    }
+
+    /// `nvext` as an object or an explicit `null` is removed; the salt is still written.
+    #[test]
+    fn rewrite_forwarded_body_strips_nvext_for_raw_engines() {
+        for body in [
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"nvext":{"agent_hints":{"osl":32},"cache_salt":"tenant-a"}}"#.as_slice(),
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"nvext":null}"#.as_slice(),
+        ] {
+            let modified = rewrite_forwarded_body(body, true, None, Some("tenant-a")).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+            let obj = parsed.as_object().unwrap();
+
+            assert!(!obj.contains_key("nvext"), "{parsed}");
+            assert_eq!(parsed["model"], "m");
+            assert_eq!(parsed["messages"][0]["content"], "hi");
+            assert_eq!(parsed["max_tokens"], 8);
+            assert_eq!(parsed["cache_salt"], "dynamo-cache-salt:tenant-a");
+        }
+    }
+
+    #[test]
+    fn rewrite_forwarded_body_strip_without_nvext_is_a_no_op() {
+        let body = br#"{"model":"m","messages":[]}"#;
+        let modified = rewrite_forwarded_body(body, true, None, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+        assert_eq!(parsed, serde_json::json!({"model":"m","messages":[]}));
+    }
+
+    /// Untouched values keep their exact bytes (whitespace, escapes, number
+    /// formatting) and escaped keys survive; members come out in key order.
+    #[test]
+    fn rewrite_top_level_copies_other_members_verbatim() {
+        let body = r#"{ "model" : "m", "messages": [ {"role":"user","content":"café \"q\""} ],"nvext":{"agent_hints":{"osl":32}}, "temperature": 1.0e0, "k\"y": true , "cache_salt": "client"}"#;
+
+        let out = rewrite_top_level(body.as_bytes(), true, Some("tenant-a")).unwrap();
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            r#"{"cache_salt":"dynamo-cache-salt:tenant-a","k\"y":true,"messages":[ {"role":"user","content":"café \"q\""} ],"model":"m","temperature":1.0e0}"#
+        );
+    }
+
+    #[test]
+    fn rewrite_top_level_rejects_non_object_body() {
+        assert!(rewrite_top_level(br#"["not", "an", "object"]"#, true, None).is_err());
+        assert!(rewrite_top_level(br#"not json"#, true, None).is_err());
     }
 }

@@ -8,15 +8,18 @@ mod discovery;
 mod host;
 mod identity;
 mod load;
+mod membership_watch;
+mod namespace_source;
 mod pool_registry;
 mod publication;
 mod resolution;
+mod serving_load;
 mod topology;
+pub mod wan;
 
-pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
     DEFAULT_EXPECTED_UNIQUE_BLOCKS, KvDcRelay, KvDcRelayConfig, KvDcRelayError, KvDcRelayHealth,
-    KvDcRelayProducerConfig,
+    KvDcRelayProducerConfig, KvDcRelaySources,
 };
 #[cfg(feature = "ckf-diagnostics")]
 pub use host::{
@@ -31,6 +34,8 @@ pub use identity::{
     ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources, WorkerRole,
 };
 pub use load::PoolLoadSnapshot;
+pub use namespace_source::discovery::KvDcRelayDiscoveryConfig;
+pub use namespace_source::{KvDcRelaySourcesStatus, file::KvDcRelaySourcesFile};
 pub use publication::{
     PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
     PublicationFrameKind, RelayPublicationSource,
@@ -38,3 +43,11 @@ pub use publication::{
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };
+
+/// Whether this process publishes the serving-load streams a Relay
+/// aggregates. Off unless `DYN_SERVING_LOAD_PUBLISH` is truthy.
+pub(crate) fn serving_load_publishing_enabled() -> bool {
+    dynamo_runtime::config::env_is_truthy(
+        dynamo_runtime::config::environment_names::llm::DYN_SERVING_LOAD_PUBLISH,
+    )
+}
