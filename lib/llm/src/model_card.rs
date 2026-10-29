@@ -528,8 +528,13 @@ impl GenerationConfig {
 }
 
 /// Check if our model only has config fields for a Mistral-format model.
+///
+/// A checkpoint is Mistral-native if it ships `params.json` and `tekken.json`.
+/// This detection no longer depends on `config.json` being absent: a Mistral
+/// checkpoint that also includes `config.json` is still treated as Mistral-native
+/// when both Mistral-specific files are present.
 fn is_exclusively_mistral_model(directory: &Path) -> bool {
-    !directory.join("config.json").exists() && directory.join("params.json").exists()
+    directory.join("params.json").exists() && directory.join("tekken.json").exists()
 }
 
 /// MDC cache: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`.
@@ -2137,6 +2142,11 @@ impl ModelInfoType {
 struct HFConfig {
     /// denotes the mixin to the flattened data model which can be present
     /// in the config.json file
+    ///
+    /// Optional: some Mistral checkpoints that also ship config.json may omit
+    /// this field. When absent, architectural decisions fall back to params.json
+    /// and other metadata present in the checkpoint.
+    #[serde(default)]
     architectures: Vec<String>,
 
     /// general model type
@@ -3986,5 +3996,158 @@ mod worker_type_tests {
         );
         let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
         assert!(restored.indexer_identity.is_none());
+    }
+
+    /// Test that Mistral-native detection is based on params.json + tekken.json
+    /// presence, not config.json absence. Regression test for issue #17596.
+    #[test]
+    fn mistral_detection_with_config_json() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Mistral checkpoint WITH config.json should be detected as Mistral-native
+        std::fs::write(dir.path().join("params.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("tekken.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("config.json"), b"{}").unwrap();
+        assert!(
+            super::is_exclusively_mistral_model(dir.path()),
+            "Checkpoint with params.json + tekken.json + config.json should be Mistral-native"
+        );
+    }
+
+    /// Test backward compatibility: Mistral checkpoint without config.json
+    /// is still detected as Mistral-native.
+    #[test]
+    fn mistral_detection_without_config_json() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Traditional Mistral checkpoint WITHOUT config.json
+        std::fs::write(dir.path().join("params.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("tekken.json"), b"{}").unwrap();
+        assert!(
+            super::is_exclusively_mistral_model(dir.path()),
+            "Checkpoint with params.json + tekken.json (no config.json) should be Mistral-native"
+        );
+    }
+
+    /// Test that HF-only checkpoints are not detected as Mistral-native.
+    #[test]
+    fn non_mistral_detection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // HF checkpoint with only config.json
+        std::fs::write(dir.path().join("config.json"), b"{}").unwrap();
+        assert!(
+            !super::is_exclusively_mistral_model(dir.path()),
+            "Checkpoint with only config.json should not be Mistral-native"
+        );
+
+        // Checkpoint with params.json but no tekken.json
+        std::fs::remove_file(dir.path().join("config.json")).unwrap();
+        std::fs::write(dir.path().join("params.json"), b"{}").unwrap();
+        assert!(
+            !super::is_exclusively_mistral_model(dir.path()),
+            "Checkpoint with params.json but no tekken.json should not be Mistral-native"
+        );
+    }
+
+    /// Test that config.json without architectures field can be parsed.
+    /// Regression test for issue #17596 problem 2.
+    #[test]
+    fn config_json_without_architectures_parses() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        // config.json with model_type but no architectures field
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "model_type": "test_model",
+                "eos_token_id": 2,
+                "bos_token_id": 1
+            }"#,
+        )?;
+
+        // This should not fail with "missing field `architectures`"
+        let result = HFConfig::from_json_file(dir.path().join("config.json"));
+        assert!(
+            result.is_ok(),
+            "config.json without architectures should parse: {:?}",
+            result.err()
+        );
+
+        let config = result?;
+        assert!(
+            config.architectures.is_empty(),
+            "architectures should be empty when field is absent"
+        );
+
+        Ok(())
+    }
+
+    /// Test backward compatibility: config.json with architectures field
+    /// still works.
+    #[test]
+    fn config_json_with_architectures_parses() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "architectures": ["TestModelForCausalLM"],
+                "model_type": "test_model",
+                "eos_token_id": 2,
+                "bos_token_id": 1
+            }"#,
+        )?;
+
+        let result = HFConfig::from_json_file(dir.path().join("config.json"));
+        assert!(
+            result.is_ok(),
+            "config.json with architectures should parse"
+        );
+
+        let config = result?;
+        assert_eq!(
+            config.architectures,
+            vec!["TestModelForCausalLM"],
+            "architectures should contain the provided value"
+        );
+
+        Ok(())
+    }
+
+    /// Integration test: Mistral checkpoint with config.json lacking
+    /// architectures should not block model registration.
+    #[test]
+    fn mistral_with_minimal_config_json_from_disk() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        // Mistral-native files
+        std::fs::write(dir.path().join("params.json"), b"{}")?;
+        std::fs::write(dir.path().join("tekken.json"), b"{}")?;
+
+        // Minimal config.json without architectures
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "model_type": "mistral",
+                "eos_token_id": 2
+            }"#,
+        )?;
+
+        // Should be detected as Mistral-native (uses tekken + native renderer)
+        assert!(
+            super::is_exclusively_mistral_model(dir.path()),
+            "Should detect as Mistral-native despite config.json presence"
+        );
+
+        // If somehow treated as HF model, config parsing should not fail
+        let result = HFConfig::from_json_file(dir.path().join("config.json"));
+        assert!(
+            result.is_ok(),
+            "Minimal config.json should be parseable: {:?}",
+            result.err()
+        );
+
+        Ok(())
     }
 }
