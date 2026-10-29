@@ -150,6 +150,7 @@ mod tests {
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 messages,
                 model: "test".to_string(),
@@ -159,6 +160,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            thinking_token_budget: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -206,6 +208,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            thinking_token_budget: None,
         }
     }
 
@@ -218,6 +221,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            thinking_token_budget: None,
         }
     }
 

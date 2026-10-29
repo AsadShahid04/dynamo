@@ -26,6 +26,7 @@ from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
+    _resolve_streaming_kv_events_config,
     _strip_postprocess_workers,
     init_llm_worker,
 )
@@ -475,20 +476,75 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
     raise EngineArgsCaptured(engine_args)
 
 
+def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
+    resolved = _resolve_streaming_kv_events_config(
+        {
+            "kv_cache_config": {
+                "kv_events_config": {
+                    "enable_kv_cache_events": True,
+                    "publisher": "zmq",
+                    "endpoint": "tcp://*:6000",
+                    "topic": "kv-events",
+                }
+            }
+        }
+    )
+
+    assert resolved == {
+        "enable_kv_cache_events": True,
+        "publisher": "zmq",
+        "endpoint": "tcp://*:6000",
+        "topic": "kv-events",
+    }
+
+
 @pytest.mark.parametrize(
-    ("publish_flags", "expected_iter_perf_stats"),
+    ("cli_args", "fpm_port_env", "expected"),
     [
-        (["--publish-kv-events"], False),
-        (["--publish-metrics"], True),
-        (["--publish-kv-events", "--publish-metrics"], True),
-        (["--publish-events-and-metrics"], True),
+        ([], None, False),
+        (["--fpm-trace"], None, True),
+        ([], "20380", True),
+        (["--publish-kv-events"], None, False),
+        (["--publish-metrics"], None, True),
+        (["--publish-kv-events", "--publish-metrics"], None, True),
+    ],
+)
+def test_config_publish_forward_pass_metrics_opt_in(
+    monkeypatch, cli_args, fpm_port_env, expected
+):
+    """The Planner's forward-pass metrics follow the opt-in shared with vLLM
+    and SGLang, plus --publish-metrics, which already pays for the iteration
+    statistics both read. --publish-kv-events alone never enables them."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    # Config.validate writes DYN_FPM_TRACE back; setenv restores it on teardown.
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    if fpm_port_env is not None:
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
+
+    config = parse_args(["--model", "fake-model", *cli_args])
+
+    assert config.publish_forward_pass_metrics is expected
+
+
+@pytest.mark.parametrize(
+    ("publish_flags", "fpm_port_env", "expected_iter_perf_stats"),
+    [
+        (["--publish-kv-events"], None, False),
+        (["--publish-metrics"], None, True),
+        (["--fpm-trace"], None, True),
+        ([], "20380", True),
+        ([], None, False),
+        (["--publish-kv-events", "--publish-metrics"], None, True),
+        (["--publish-events-and-metrics"], None, True),
     ],
 )
 @pytest.mark.asyncio
 async def test_init_llm_worker_engine_args_without_overrides(
-    monkeypatch, publish_flags, expected_iter_perf_stats
+    monkeypatch, publish_flags, fpm_port_env, expected_iter_perf_stats
 ):
-    """KV events and metrics control their respective engine paths independently."""
+    """Iteration stats follow --publish-metrics and the forward-pass metrics
+    opt-in, never --publish-kv-events alone; the engine-level
+    return_perf_metrics default stays off regardless."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
@@ -496,6 +552,10 @@ async def test_init_llm_worker_engine_args_without_overrides(
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    if fpm_port_env is not None:
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
 
     if publish_flags == ["--publish-events-and-metrics"]:
         with pytest.warns(
@@ -626,7 +686,38 @@ async def test_publish_events_does_not_materialize_unset_kv_cache_defaults(monke
         kv_cache_config["free_gpu_memory_fraction"] == config.free_gpu_memory_fraction
     )
     assert kv_cache_config["event_buffer_max_size"] > 0
+    assert kv_cache_config["use_kv_cache_manager_v2"] is False
     assert "enable_swa_scratch_reuse" not in kv_cache_config
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_publish_events_rejects_kv_cache_manager_v2(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--override-engine-args",
+            '{"kv_cache_config": {"use_kv_cache_manager_v2": true}}',
+        ]
+    )
+
+    with (
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ) as get_llm_engine,
+    ):
+        with pytest.raises(ValueError, match="use_kv_cache_manager_v2=True"):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    get_llm_engine.assert_not_called()
 
 
 class MultimodalProcessorInstantiated(Exception):
