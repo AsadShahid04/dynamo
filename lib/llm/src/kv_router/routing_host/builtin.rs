@@ -351,13 +351,33 @@ impl RoutingHost {
         } else {
             None
         };
+        let hard_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Hard {
+            operation.as_ref().and_then(Hold::target).map(from_table)
+        } else {
+            None
+        };
         let target_for_worker = |worker_id| {
-            AffinityTarget::new(
-                worker_id,
-                soft_affinity_target
-                    .filter(|target| target.worker_id == worker_id)
-                    .and_then(|target| target.dp_rank),
-            )
+            let dp_rank = soft_affinity_target
+                .filter(|target| target.worker_id == worker_id)
+                .and_then(|target| target.dp_rank)
+                .or_else(|| {
+                    // In hard mode, preserve dp_rank from existing pin or select one for DP>1
+                    if self.session_affinity_mode == SessionAffinityMode::Hard {
+                        hard_affinity_target
+                            .filter(|target| target.worker_id == worker_id)
+                            .and_then(|target| target.dp_rank)
+                            .or_else(|| {
+                                // First request or no rank stored yet: select a dp_rank
+                                // Use the unique rank if DP=1, otherwise select rank 0
+                                self.kv_router_if_enabled()
+                                    .and_then(|router| router.unique_dp_rank_for_worker(worker_id))
+                                    .or(Some(0))
+                            })
+                    } else {
+                        None
+                    }
+                });
+            AffinityTarget::new(worker_id, dp_rank)
         };
         let uses_occupancy = self
             .required_worker_inputs()

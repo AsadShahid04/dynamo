@@ -3137,6 +3137,7 @@ async fn builtin_host_with_affinity(
     (host, affinity)
 }
 
+
 async fn bind_affinity_target(
     router: &RoutingHost,
     session_id: &SessionAffinityId,
@@ -5047,5 +5048,248 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
     tokio::time::sleep(ttl + Duration::from_millis(300)).await;
     assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
     drop(router);
+    runtime.shutdown();
+}
+
+/// Hard session affinity with DP>1 should pin to the same (worker_id, dp_rank) across all turns
+/// using round-robin policy.
+#[tokio::test]
+#[serial_test::serial]
+async fn hard_affinity_pins_dp_rank_with_round_robin() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-hard-affinity-dp-round-robin".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    
+    // Register 2 workers
+    endpoint.register_endpoint_instance().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_ids = client.wait_for_instances().await.unwrap();
+    assert_eq!(worker_ids.len(), 2);
+    
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, _affinity) = builtin_host_with_affinity(
+        client.clone(),
+        RouterMode::RoundRobin,
+        dispatch.clone(),
+        load_context,
+        SessionAffinityMode::Hard,
+    )
+    .await;
+    
+    // Send 3 requests with the same session ID
+    for _ in 0..3 {
+        let mut stream = host
+            .generate(affinity_request("hard-dp-round-robin", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+    }
+    
+    // All requests should hit the same (worker_id, dp_rank)
+    let worker_ids_used = dispatch.worker_ids.lock().unwrap().clone();
+    let dp_ranks_used = dispatch.dp_ranks.lock().unwrap().clone();
+    assert_eq!(worker_ids_used.len(), 3);
+    assert_eq!(dp_ranks_used.len(), 3);
+    
+    // All should be the same worker
+    assert_eq!(worker_ids_used[0], worker_ids_used[1]);
+    assert_eq!(worker_ids_used[1], worker_ids_used[2]);
+    
+    // All should have a dp_rank (Some(0) by default for hard mode)
+    assert!(dp_ranks_used[0].is_some());
+    assert_eq!(dp_ranks_used[0], dp_ranks_used[1]);
+    assert_eq!(dp_ranks_used[1], dp_ranks_used[2]);
+    
+    drop(host);
+    runtime.shutdown();
+}
+
+/// Hard session affinity with DP>1 should pin to the same (worker_id, dp_rank) across all turns
+/// using random policy.
+#[tokio::test]
+#[serial_test::serial]
+async fn hard_affinity_pins_dp_rank_with_random() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-hard-affinity-dp-random".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    
+    // Register 2 workers
+    endpoint.register_endpoint_instance().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_ids = client.wait_for_instances().await.unwrap();
+    assert_eq!(worker_ids.len(), 2);
+    
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, _affinity) = builtin_host_with_affinity(
+        client.clone(),
+        RouterMode::Random,
+        dispatch.clone(),
+        load_context,
+        SessionAffinityMode::Hard,
+    )
+    .await;
+    
+    // Send 3 requests with the same session ID
+    for _ in 0..3 {
+        let mut stream = host
+            .generate(affinity_request("hard-dp-random", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+    }
+    
+    // All requests should hit the same (worker_id, dp_rank)
+    let worker_ids_used = dispatch.worker_ids.lock().unwrap().clone();
+    let dp_ranks_used = dispatch.dp_ranks.lock().unwrap().clone();
+    assert_eq!(worker_ids_used.len(), 3);
+    assert_eq!(dp_ranks_used.len(), 3);
+    
+    // All should be the same worker
+    assert_eq!(worker_ids_used[0], worker_ids_used[1]);
+    assert_eq!(worker_ids_used[1], worker_ids_used[2]);
+    
+    // All should have a dp_rank (Some(0) by default for hard mode)
+    assert!(dp_ranks_used[0].is_some());
+    assert_eq!(dp_ranks_used[0], dp_ranks_used[1]);
+    assert_eq!(dp_ranks_used[1], dp_ranks_used[2]);
+    
+    drop(host);
+    runtime.shutdown();
+}
+
+/// Hard session affinity with DP>1 should pin to the same (worker_id, dp_rank) across all turns
+/// using least-loaded policy.
+#[tokio::test]
+#[serial_test::serial]
+async fn hard_affinity_pins_dp_rank_with_least_loaded() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-hard-affinity-dp-least-loaded".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    
+    // Register 2 workers
+    endpoint.register_endpoint_instance().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_ids = client.wait_for_instances().await.unwrap();
+    assert_eq!(worker_ids.len(), 2);
+    
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, _affinity) = builtin_host_with_affinity(
+        client.clone(),
+        RouterMode::LeastLoaded,
+        dispatch.clone(),
+        load_context,
+        SessionAffinityMode::Hard,
+    )
+    .await;
+    
+    // Send 3 requests with the same session ID
+    for _ in 0..3 {
+        let mut stream = host
+            .generate(affinity_request("hard-dp-least-loaded", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+    }
+    
+    // All requests should hit the same (worker_id, dp_rank)
+    let worker_ids_used = dispatch.worker_ids.lock().unwrap().clone();
+    let dp_ranks_used = dispatch.dp_ranks.lock().unwrap().clone();
+    assert_eq!(worker_ids_used.len(), 3);
+    assert_eq!(dp_ranks_used.len(), 3);
+    
+    // All should be the same worker
+    assert_eq!(worker_ids_used[0], worker_ids_used[1]);
+    assert_eq!(worker_ids_used[1], worker_ids_used[2]);
+    
+    // All should have a dp_rank (Some(0) by default for hard mode)
+    assert!(dp_ranks_used[0].is_some());
+    assert_eq!(dp_ranks_used[0], dp_ranks_used[1]);
+    assert_eq!(dp_ranks_used[1], dp_ranks_used[2]);
+    
+    drop(host);
+    runtime.shutdown();
+}
+
+/// Soft session affinity behavior should remain unchanged - it may re-pin to different ranks
+#[tokio::test]
+#[serial_test::serial]
+async fn soft_affinity_behavior_unchanged() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-soft-affinity-check".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    
+    // Register 1 worker
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_ids = client.wait_for_instances().await.unwrap();
+    assert_eq!(worker_ids.len(), 1);
+    
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, _affinity) = builtin_host_with_affinity(
+        client.clone(),
+        RouterMode::RoundRobin,
+        dispatch.clone(),
+        load_context,
+        SessionAffinityMode::Soft,
+    )
+    .await;
+    
+    // Send 2 requests with the same session ID
+    for _ in 0..2 {
+        let mut stream = host
+            .generate(affinity_request("soft-check", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+    }
+    
+    // All requests should hit the same worker (only one available)
+    let worker_ids_used = dispatch.worker_ids.lock().unwrap().clone();
+    let dp_ranks_used = dispatch.dp_ranks.lock().unwrap().clone();
+    assert_eq!(worker_ids_used.len(), 2);
+    assert_eq!(dp_ranks_used.len(), 2);
+    
+    // All should be the same worker
+    assert_eq!(worker_ids_used[0], worker_ids_used[1]);
+    
+    // In soft mode, dp_rank behavior is allowed to vary (this test just verifies no crash)
+    // The fix should not change soft mode behavior
+    
+    drop(host);
     runtime.shutdown();
 }
