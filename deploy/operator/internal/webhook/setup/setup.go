@@ -23,10 +23,10 @@ type Options struct {
 	Config          *configv1alpha1.OperatorConfiguration
 	RuntimeConfig   *commoncontroller.RuntimeConfig
 	OperatorVersion string
-	// DGDRDefaultImage is the default DGDR profiler image, put into
-	// DGDR spec.image when unset; empty derives
-	// dynamo-planner:<OperatorVersion>.
-	DGDRDefaultImage  string
+	// DGDRV1beta1 configures the defaults of v1beta1 Requests.
+	DGDRV1beta1 webhookdefaulting.DGDRV1beta1Options
+	// DGDRV1beta2 configures cluster-derived defaults of v1beta2 Requests.
+	DGDRV1beta2       webhookdefaulting.DGDRV1beta2Options
 	OperatorPrincipal string
 	Gate              features.Gate
 }
@@ -62,11 +62,6 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}
 
-	dckptHandler := webhookvalidation.NewDynamoCheckpointHandler()
-	if err := dckptHandler.RegisterWithManager(mgr, gate); err != nil {
-		return fmt.Errorf("unable to register DynamoCheckpoint webhook: %w", err)
-	}
-
 	dmHandler := webhookvalidation.NewDynamoModelHandler()
 	if err := dmHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoModel webhook: %w", err)
@@ -99,7 +94,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		}
 	}
 
-	dcdDefaulter := webhookdefaulting.NewDCDDefaulter()
+	dcdDefaulter := webhookdefaulting.NewDCDDefaulter(opts.OperatorVersion)
 	if err := dcdDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
 	}
@@ -109,12 +104,13 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}
 
-	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRDefaultImage)
+	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRV1beta1.DefaultImage).
+		WithV1beta2(opts.DGDRV1beta2)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
 	}
 
-	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetClient(), cfg)
+	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetAPIReader(), cfg)
 	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
 	}
