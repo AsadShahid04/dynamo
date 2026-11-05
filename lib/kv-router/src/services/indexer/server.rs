@@ -90,10 +90,14 @@ struct RegisterRequest {
     #[serde(default = "default_routing_group", rename = "tenant_id")]
     _tenant_id: String,
     block_size: u32,
-    #[serde(default)]
     dp_rank: Option<u32>,
-    #[serde(default)]
     replay_endpoint: Option<String>,
+    /// The source derives multimodal pad values from engine identities (SGLang
+    /// after sgl-project/sglang#43043): exclude every event token at or above
+    /// `MM_PAD_SHIFT_VALUE`. Otherwise only values that do not fit in `u32`
+    /// are excluded.
+    #[serde(default)]
+    engine_owned_mm_identity: bool,
     /// Optional per-tenant salt (Mooncake RFC #1403 `additionalsalt`).
     /// Currently accepted but not yet mixed into hashes — engines apply
     /// their own salt internally. Plumbed for forward compatibility.
@@ -105,11 +109,9 @@ struct RegisterRequest {
 struct UnregisterRequest {
     instance_id: WorkerId,
     model_name: String,
-    #[serde(default)]
     routing_group: Option<String>,
     #[serde(default, rename = "tenant_id")]
     _tenant_id: Option<String>,
-    #[serde(default)]
     dp_rank: Option<u32>,
 }
 
@@ -121,10 +123,8 @@ struct QueryRequest {
     routing_group: String,
     #[serde(default = "default_routing_group", rename = "tenant_id")]
     _tenant_id: String,
-    #[serde(default)]
     lora_name: Option<String>,
     /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
-    #[serde(default)]
     cache_salt: Option<String>,
 }
 
@@ -138,7 +138,6 @@ struct QueryByHashRequest {
     _tenant_id: String,
     /// Invalid for `/query_by_hash`. Callers must precompute `block_hashes` with the intended
     /// cache salt and omit this field; a non-null value is rejected.
-    #[serde(default)]
     cache_salt: Option<String>,
 }
 
@@ -184,6 +183,7 @@ async fn register(
             req.routing_group,
             req.block_size,
             req.replay_endpoint,
+            req.engine_owned_mm_identity,
         )
         .await
     {
@@ -397,7 +397,6 @@ async fn query_by_hash(
 #[derive(Deserialize)]
 struct ListenerControlRequest {
     instance_id: WorkerId,
-    #[serde(default)]
     dp_rank: Option<u32>,
 }
 
@@ -570,7 +569,10 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
             "/query",
             post(query).layer(DefaultBodyLimit::max(QUERY_REQUEST_BODY_LIMIT_BYTES)),
         )
-        .route("/query_by_hash", post(query_by_hash))
+        .route(
+            "/query_by_hash",
+            post(query_by_hash).layer(DefaultBodyLimit::max(QUERY_REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/dump", get(dump_events))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
@@ -736,6 +738,7 @@ mod tests {
                 "acme".to_string(),
                 4,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -750,6 +753,7 @@ mod tests {
                 "other".to_string(),
                 8,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -918,6 +922,7 @@ mod tests {
                 "default".to_string(),
                 4,
                 None,
+                false,
             )
             .await
             .unwrap();

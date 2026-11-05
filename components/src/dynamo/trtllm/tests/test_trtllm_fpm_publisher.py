@@ -295,9 +295,9 @@ def _build_publisher_stub(
     monkeypatch,
     *,
     attention_dp_size: int,
-    fpm_enabled: bool,
-    publish_kv_events: bool = True,
+    publish_forward_pass_metrics: bool,
     publish_metrics: bool = True,
+    kv_event_publication_mode: publisher_mod.KvEventPublicationMode = publisher_mod.KvEventPublicationMode.POLLING,
 ):
     """Bypass Publisher.__init__ (heavy deps) and seed only the attributes
     initialize() reads or writes. All side-effecty subsystems are stubbed
@@ -319,10 +319,12 @@ def _build_publisher_stub(
     pub.metrics_collector = None
     pub.kv_state_endpoint = None
     pub.image_token_id = None
-    pub.publish_kv_events = publish_kv_events
     pub.publish_metrics = publish_metrics
+    pub.publish_forward_pass_metrics = publish_forward_pass_metrics
+    pub.kv_event_publication_mode = kv_event_publication_mode
+    pub.streaming_kv_events_config = None
+    pub.streaming_kv_events_gpus_per_node = None
     pub.attention_dp_size = attention_dp_size
-    pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
     pub.metrics_publisher = None
     pub.fpm_publisher = None
@@ -331,6 +333,7 @@ def _build_publisher_stub(
     pub.publish_kv_cache_events_thread = None
     pub.publish_stats_thread = None
     pub.partial_block_hashes = set()
+    pub.suppressed_block_hashes = set()
     pub.error_queue = queue.Queue()
     pub._stop_event = threading.Event()
     pub._last_engine_event_id_by_rank = {}
@@ -364,13 +367,64 @@ def _build_publisher_stub(
     return pub, publisher_mod, fake_fpm_cls
 
 
+def test_streaming_kv_events_create_direct_subscribers_without_engine_polling(
+    monkeypatch,
+):
+    pub, module, _ = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=2,
+        publish_forward_pass_metrics=True,
+    )
+    pub.kv_event_publication_mode = publisher_mod.KvEventPublicationMode.STREAMING
+    pub.streaming_kv_events_config = {
+        "endpoint": "tcp://*:5557",
+        "topic": "kv-events",
+    }
+    pub.streaming_kv_events_gpus_per_node = 1
+    monkeypatch.setenv("DYN_TRTLLM_KV_EVENT_HOSTS", "worker01,worker02")
+
+    pub.initialize()
+
+    calls = module.KvEventPublisher.call_args_list
+    assert [call.kwargs["zmq_endpoint"] for call in calls] == [
+        "tcp://worker01:5557",
+        "tcp://worker02:5558",
+    ]
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
+
+
+def test_streaming_kv_events_fall_back_to_slurm_hosts(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_KV_EVENT_HOSTS", raising=False)
+    monkeypatch.setenv("SLURM_STEP_NODELIST", "worker[01-03]")
+
+    assert publisher_mod._streaming_kv_event_hosts(2, 1) == [
+        "worker01",
+        "worker02",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "rank", "expected"),
+    [
+        ("ipc:///tmp/kv-events", 1, "ipc:///tmp/kv-events_dp1"),
+        ("inproc://kv-events", 2, "inproc://kv-events_dp2"),
+        ("tcp://127.0.0.1:5557", 2, "tcp://127.0.0.1:5559"),
+    ],
+)
+def test_streaming_kv_event_endpoint_offset_matches_trtllm_streaming_manager(
+    endpoint, rank, expected
+):
+    assert publisher_mod._offset_endpoint_port(endpoint, rank) == expected
+
+
 def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     monkeypatch,
 ):
-    """Under non-attention-DP (attention_dp_size == 1, fpm_enabled == True),
-    Publisher.initialize() constructs FpmDirectPublisher with dp_size=1."""
+    """Under non-attention-DP (attention_dp_size == 1), the forward-pass
+    metrics opt-in makes Publisher.initialize() construct FpmDirectPublisher
+    with dp_size=1."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
-        monkeypatch, attention_dp_size=1, fpm_enabled=True
+        monkeypatch, attention_dp_size=1, publish_forward_pass_metrics=True
     )
     pub.initialize()
     fake_fpm_cls.assert_called_once()
@@ -380,34 +434,76 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     assert pub.fpm_publisher is not None
 
 
-def test_publisher_initialize_metrics_only_does_not_start_kv_events(monkeypatch):
+def test_publisher_initialize_metrics_only_starts_stats_without_fpm(monkeypatch):
+    """The Publisher's two gates stay independent: the stats thread follows
+    either opt-in, the Planner publisher only the forward-pass one. Resolving
+    `--publish-metrics` into both is the config layer's job, covered by
+    test_trtllm_unit.py."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
         monkeypatch,
         attention_dp_size=1,
-        fpm_enabled=True,
-        publish_kv_events=False,
+        publish_forward_pass_metrics=False,
         publish_metrics=True,
+        kv_event_publication_mode=publisher_mod.KvEventPublicationMode.DISABLED,
     )
     pub.initialize()
 
-    fake_fpm_cls.assert_called_once()
+    fake_fpm_cls.assert_not_called()
+    assert pub.metrics_publisher is not None
+    assert pub.fpm_publisher is None
     pub._init_publish_metrics_thread.assert_called_once()
     pub._init_publish_kv_cache_events_thread.assert_not_called()
 
 
-def test_publisher_initialize_kv_events_only_does_not_start_metrics(monkeypatch):
+def test_publisher_initialize_kv_events_only_does_not_start_stats(monkeypatch):
+    """KV events never need iteration stats, so neither stats-fed publisher
+    nor the stats thread comes up."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
         monkeypatch,
         attention_dp_size=1,
-        fpm_enabled=True,
-        publish_kv_events=True,
+        publish_forward_pass_metrics=False,
         publish_metrics=False,
     )
     pub.initialize()
 
     fake_fpm_cls.assert_not_called()
+    assert pub.metrics_publisher is None
     pub._init_publish_metrics_thread.assert_not_called()
     pub._init_publish_kv_cache_events_thread.assert_called_once()
+
+
+def test_publisher_initialize_fpm_only_starts_stats_and_planner_publisher(
+    monkeypatch,
+):
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=1,
+        publish_forward_pass_metrics=True,
+        publish_metrics=False,
+        kv_event_publication_mode=publisher_mod.KvEventPublicationMode.DISABLED,
+    )
+    pub.initialize()
+
+    fake_fpm_cls.assert_called_once()
+    assert pub.metrics_publisher is not None
+    pub._init_publish_metrics_thread.assert_called_once()
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
+
+
+def test_publisher_initialize_without_any_opt_in_starts_no_threads(monkeypatch):
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=1,
+        publish_forward_pass_metrics=False,
+        publish_metrics=False,
+        kv_event_publication_mode=publisher_mod.KvEventPublicationMode.DISABLED,
+    )
+    pub.initialize()
+
+    fake_fpm_cls.assert_not_called()
+    assert pub.metrics_publisher is None
+    pub._init_publish_metrics_thread.assert_not_called()
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
 
 
 def _publisher_for_kv_event_test():
@@ -416,6 +512,7 @@ def _publisher_for_kv_event_test():
     pub._last_engine_event_id_by_rank = {}
     pub.processing_initial_created_events = False
     pub.partial_block_hashes = set()
+    pub.suppressed_block_hashes = set()
     pub.kv_block_size = 4
     pub.max_window_size = None
     return pub
@@ -442,6 +539,55 @@ def _stored_kv_event(cache_salt="tenant-a"):
             ],
         },
     }
+
+
+def _kv_block(block_hash, token_ids):
+    return {"block_hash": block_hash, "tokens": [{"token_id": t} for t in token_ids]}
+
+
+def test_handle_kv_event_suppresses_digest_token_blocks_and_descendants():
+    # KV cache manager v2 emits a multimodal item's digest as a string token id.
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+    digest = "d854e3211f299729f8e6e83012471d5cb867f5f66a104cce91950c9fe506e06f"
+    events = [
+        {
+            "event_id": 1,
+            "data": {
+                "type": "stored",
+                "parent_hash": None,
+                "blocks": [
+                    _kv_block(10, [1, 2, 3, 4]),
+                    _kv_block(11, [5, digest, 151937, 151938]),
+                    _kv_block(12, [151939, 151940, 151941, 151942]),
+                ],
+            },
+        },
+        {
+            "event_id": 2,
+            "data": {
+                "type": "stored",
+                "parent_hash": 12,
+                "blocks": [_kv_block(13, [6, 7, 8, 9])],
+            },
+        },
+        {
+            "event_id": 3,
+            "data": {"type": "removed", "block_hashes": [10, 11, 12, 13]},
+        },
+    ]
+
+    pub._handle_kv_event_batch(events)
+
+    published = publisher.publish_batch.call_args.args[0]
+    assert [(e["type"], e["block_hashes"]) for e in published] == [
+        ("stored", [10]),
+        ("removed", [10]),
+    ]
+    assert published[0]["token_ids"] == [1, 2, 3, 4]
+    assert pub.suppressed_block_hashes == set()
 
 
 def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
@@ -549,7 +695,7 @@ def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):
     """Under attention-DP (attention_dp_size > 1), Publisher.initialize()
     constructs one FpmDirectPublisher channel per attention-DP rank."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
-        monkeypatch, attention_dp_size=4, fpm_enabled=False
+        monkeypatch, attention_dp_size=4, publish_forward_pass_metrics=True
     )
     pub.initialize()
     fake_fpm_cls.assert_called_once()
