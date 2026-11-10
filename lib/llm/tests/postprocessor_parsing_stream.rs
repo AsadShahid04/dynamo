@@ -6958,3 +6958,139 @@ async fn explicit_v2_rejects_legacy_and_mixed_stream_parser_pairs() {
         );
     }
 }
+
+// gpt-oss ends a directed `commentary to=functions.*` tool call with either
+// `<|call|>` or `<|return|>`; both are model EOS tokens (`eos_token_id` is
+// `[200002, 199999, 200012]`, i.e. `<|return|>`, `<|endoftext|>`, `<|call|>`).
+// openai_harmony and vLLM's `openai` tool parser return the call either way.
+// The text is modeled on a real gpt-oss-120b output, shortened.
+const GPT_OSS_SUBMIT_REPORT_ARGS: &str = r#"{"summary":"libfoo 1.2.16 is affected by CVE-2026-0001; upstream fixed it on main but no release ships the fix yet.","findings":[{"id":"CVE-2026-0001","package":"libfoo","installed_version":"1.2.16","fixed_version":null,"decision":"wait-for-upstream","reason":"Fixed on the upstream main branch only."}],"actions":[]}"#;
+
+fn gpt_oss_submit_report_request() -> NvCreateChatCompletionRequest {
+    serde_json::from_value(serde_json::json!({
+        "model": "gpt-oss-120b",
+        "messages": [{"role": "user", "content": "The investigation is done. Deliver the report."}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "submit_report",
+                "description": "Submit the final report.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "findings": {"type": "array", "items": {"type": "object"}},
+                        "actions": {"type": "array", "items": {"type": "object"}}
+                    },
+                    "required": ["summary", "findings"]
+                }
+            }
+        }],
+        "tool_choice": "auto",
+        "stream": false
+    }))
+    .unwrap()
+}
+
+/// Split Harmony text the way the detokenizer streams it: each control token is
+/// its own chunk, and message text arrives a few characters at a time.
+fn harmony_token_chunks(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let len = if rest.starts_with("<|") {
+            rest.find("|>").map_or(rest.len(), |end| end + 2)
+        } else {
+            let next_marker = rest.find("<|").unwrap_or(rest.len());
+            rest.char_indices()
+                .nth(4)
+                .map_or(rest.len(), |(idx, _)| idx)
+                .min(next_marker)
+        };
+        let (chunk, tail) = rest.split_at(len);
+        chunks.push(chunk.to_string());
+        rest = tail;
+    }
+    chunks
+}
+
+/// Run a gpt-oss completion through the `harmony` + `gpt_oss` postprocessor and the
+/// non-streaming aggregator, as `/v1/chat/completions` with `stream: false` does.
+async fn aggregate_gpt_oss_submit_report(terminator: &str) -> NvCreateChatCompletionResponse {
+    let preprocessor = build_preprocessor(Some("gpt_oss"), Some("harmony"));
+    let request = gpt_oss_submit_report_request();
+    let text = format!(
+        "<|channel|>analysis<|message|>The investigation is done, so deliver the report. Call submit_report.<|end|>\
+         <|start|>assistant<|channel|>commentary to=functions.submit_report <|constrain|>json<|message|>\
+         {GPT_OSS_SUBMIT_REPORT_ARGS}{terminator}"
+    );
+    let mut chunks: Vec<_> = harmony_token_chunks(&text)
+        .iter()
+        .map(|chunk| mock_content_chunk(chunk))
+        .collect();
+    chunks.push(mock_final_chunk());
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(chunks.into_iter().map(Annotated::from_data)),
+            &request,
+            false,
+            false,
+        )
+        .expect("postprocessor_parsing_stream should build");
+    NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::new(Some("harmony".to_string()), Some("gpt_oss".to_string())),
+    )
+    .await
+    .expect("aggregation should succeed")
+}
+
+fn assert_gpt_oss_submit_report_call(response: &NvCreateChatCompletionResponse, case: &str) {
+    let choice = &response.inner.choices[0];
+    let calls = choice.message.tool_calls.as_deref().unwrap_or_default();
+    assert_eq!(
+        calls.len(),
+        1,
+        "{case}: expected the submit_report call, got finish_reason={:?} content={:?} reasoning_content={:?}",
+        choice.finish_reason,
+        choice.message.content,
+        choice.message.reasoning_content,
+    );
+    assert_eq!(calls[0].function.name, "submit_report", "{case}");
+    let args: Value = serde_json::from_str(&calls[0].function.arguments)
+        .unwrap_or_else(|e| panic!("{case}: arguments not valid JSON: {e}"));
+    assert_eq!(
+        args,
+        serde_json::from_str::<Value>(GPT_OSS_SUBMIT_REPORT_ARGS).unwrap(),
+        "{case}"
+    );
+    assert_eq!(
+        choice.finish_reason,
+        Some(FinishReason::ToolCalls),
+        "{case}"
+    );
+}
+
+/// Control: the `<|call|>` terminator is kept visible and the call is returned.
+#[tokio::test]
+async fn gpt_oss_harmony_tool_call_terminated_by_call_is_returned() {
+    let response = aggregate_gpt_oss_submit_report("<|call|>").await;
+    assert_gpt_oss_submit_report_call(&response, "terminated by <|call|>");
+}
+
+/// gpt-oss often ends the tool call with `<|return|>` instead of `<|call|>`.
+#[tokio::test]
+async fn gpt_oss_harmony_tool_call_terminated_by_return_is_returned() {
+    let response = aggregate_gpt_oss_submit_report("<|return|>").await;
+    assert_gpt_oss_submit_report_call(&response, "terminated by <|return|>");
+}
+
+/// What the parser actually receives for the `<|return|>` case: `<|return|>` is a
+/// hidden EOS stop (only the harmony parser's end token `<|call|>` is moved to the
+/// visible stops), so generation stops on it, its text is dropped before parsing,
+/// and the stream ends right after the call's JSON with `finish_reason: stop`.
+#[tokio::test]
+async fn gpt_oss_harmony_tool_call_ended_by_hidden_eos_is_returned() {
+    let response = aggregate_gpt_oss_submit_report("").await;
+    assert_gpt_oss_submit_report_call(&response, "ended by a hidden <|return|> EOS");
+}

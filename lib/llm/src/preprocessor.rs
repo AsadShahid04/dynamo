@@ -3893,6 +3893,42 @@ impl OpenAIPreprocessor {
             }
         }
 
+        // gpt-oss ends tool calls with either `<|call|>` or `<|return|>` (both are model EOS tokens).
+        // The harmony parser config only lists `<|call|>`, but we need to treat `<|return|>` the same way
+        // to prevent tool calls from being dropped when the model chooses that terminator. See #18194.
+        if tool_call_parser == "harmony" {
+            let return_token = "<|return|>";
+            match self.tokenizer.encode(return_token) {
+                Ok(encoded) => {
+                    let was_hidden_eos = Self::remove_single_token_marker(
+                        hidden_stop_token_ids,
+                        encoded.token_ids(),
+                    );
+                    if was_hidden_eos {
+                        if let [token_id] = encoded.token_ids()
+                            && !visible_stop_token_ids.contains(token_id)
+                        {
+                            visible_stop_token_ids.push(*token_id);
+                        }
+                    } else {
+                        tracing::debug!(
+                            token_ids = ?encoded.token_ids(),
+                            end_token = return_token,
+                            parser = tool_call_parser,
+                            "Tool-call end token <|return|> was not a single hidden EOS token"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = ?e,
+                        parser = tool_call_parser,
+                        "Failed to encode <|return|> token for harmony parser"
+                    );
+                }
+            }
+        }
+
         Ok(visible_stop_token_ids)
     }
 
