@@ -26,7 +26,9 @@ known-good starting points, including:
 Use recipes when you want a validated baseline or a feature comparison such as
 aggregated vs. disaggregated serving, KV-aware routing, or embedding cache.
 Use this guide when you need to benchmark a custom DGD, compare arbitrary HTTP
-endpoints, or adapt an existing recipe to your own environment.
+endpoints, or adapt an existing recipe to your own environment. For a worked
+aggregated-versus-disaggregated comparison, see
+[LLM Deployment Benchmarking](llm-deployment-benchmarking.md).
 
 ## Choosing Your Benchmarking Approach
 
