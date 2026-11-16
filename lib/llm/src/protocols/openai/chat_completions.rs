@@ -914,6 +914,50 @@ mod tests {
         serde_json::from_value(body).expect("Failed to deserialize request")
     }
 
+    /// Typed protocol failures name a static field. Plain-text failures that
+    /// quote request data do not, and the original diagnostic is left intact.
+    #[test]
+    fn test_typed_validation_error_attributes_static_field() {
+        let cases = [
+            (json!({"temperature": 9.5}), "temperature", "9.5"),
+            (
+                json!({"frequency_penalty": -3.0}),
+                "frequency_penalty",
+                "-3",
+            ),
+            (json!({"top_p": 1.5}), "top_p", "1.5"),
+        ];
+        for (extra, field, rejected) in cases {
+            let error = ValidateRequest::validate(&chat_request_with(&extra))
+                .expect_err("out-of-range field must fail");
+            assert_eq!(validate::invalid_param(&error), Some(field));
+            assert!(
+                !field.contains(rejected),
+                "attributed name must not be the rejected value"
+            );
+            assert!(
+                error.to_string().contains(rejected),
+                "client diagnostic still includes the rejected value, got: {error}"
+            );
+            assert_eq!(error.chain().count(), 1);
+        }
+
+        let token = "999001";
+        let mut bias = serde_json::Map::new();
+        bias.insert(token.to_string(), json!(1000));
+        let error = ValidateRequest::validate(&chat_request_with(&json!({ "logit_bias": bias })))
+            .expect_err("logit bias out of range");
+        assert!(
+            error.to_string().contains(token),
+            "existing diagnostic still quotes the token, got: {error}"
+        );
+        assert_eq!(validate::invalid_param(&error), None);
+
+        let error = ValidateRequest::validate(&chat_request_with(&json!({"model": "   "})))
+            .expect_err("blank model");
+        assert_eq!(validate::invalid_param(&error), None);
+    }
+
     /// Extracts sampling options for `extra` and returns the guided-decoding options it
     /// produced, failing if extraction rejected the request or engaged nothing.
     fn guided_for(extra: &serde_json::Value) -> GuidedDecodingOptions {

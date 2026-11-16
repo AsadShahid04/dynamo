@@ -4259,9 +4259,15 @@ async fn chat_completions(
     );
 
     // Handle Rest of Validation Errors
-    if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
+    if let Err(failure) = validate_chat_completion_fields_attributed(&request) {
+        let error_type = extract_error_type_from_response(&failure.response);
+        if error_type == ErrorType::Validation
+            && let Some(invalid_param) = failure.invalid_param
+        {
+            inflight_guard.note_invalid_param(invalid_param);
+        }
+        inflight_guard.mark_error(error_type);
+        return Err(failure.response);
     }
     drop(nvtx_validate);
 
@@ -4710,29 +4716,54 @@ pub fn validate_chat_completion_stream_options(
 /// `request_kind` names the request kind in the message of a backend
 /// `InvalidArgument` error, for example "chat completion". Every other validation failure
 /// becomes a 400 with the [`VALIDATION_PREFIX`] message.
+struct AttributedRequestFailure {
+    response: ErrorResponse,
+    invalid_param: Option<&'static str>,
+}
+
+fn validate_request_fields_attributed<R: ValidateRequest>(
+    request: &R,
+    request_kind: &str,
+) -> Result<(), AttributedRequestFailure> {
+    request.validate().map_err(|error| {
+        let invalid_param = crate::protocols::openai::validate::invalid_param(&error);
+        let response = if find_invalid_argument_in_chain(error.as_ref()).is_some() {
+            ErrorMessage::from_anyhow(error, &format!("Invalid {request_kind} request"))
+        } else {
+            ErrorMessage::from_http_error(
+                ErrorClass::InvalidRequest,
+                HttpError {
+                    code: 400,
+                    message: VALIDATION_PREFIX.to_string() + &error.to_string(),
+                },
+            )
+        };
+        AttributedRequestFailure {
+            response,
+            invalid_param,
+        }
+    })
+}
+
 fn validate_request_fields_generic<R: ValidateRequest>(
     request: &R,
     request_kind: &str,
 ) -> Result<(), ErrorResponse> {
-    request.validate().map_err(|e| {
-        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
-        }
-        ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string() + &e.to_string(),
-            },
-        )
-    })
+    validate_request_fields_attributed(request, request_kind).map_err(|failure| failure.response)
 }
 
 /// Validates a chat completion request and returns an error response if validation fails.
-pub fn validate_chat_completion_fields_generic(
+#[cfg(test)]
+fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
-    validate_request_fields_generic(request, "chat completion")
+    validate_chat_completion_fields_attributed(request).map_err(|failure| failure.response)
+}
+
+fn validate_chat_completion_fields_attributed(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), AttributedRequestFailure> {
+    validate_request_fields_attributed(request, "chat completion")
 }
 
 /// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
@@ -5018,6 +5049,9 @@ async fn responses(
         return Err(err_response);
     }
     if let Err(error) = chat_request.validate() {
+        if let Some(invalid_param) = crate::protocols::openai::validate::invalid_param(&error) {
+            inflight_guard.note_invalid_param(invalid_param);
+        }
         let err_response = ErrorMessage::from_anyhow(
             invalid_argument(error.to_string()).into(),
             "Invalid responses request",
