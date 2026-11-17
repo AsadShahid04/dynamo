@@ -4428,18 +4428,25 @@ async fn check_reject_media_anthropic(status: StatusCode) {
     task.await.unwrap().unwrap();
 }
 
-/// The `/reset_prefix_cache` admin route must be registered and reachable.
+/// The `/reset_prefix_cache` admin route must be registered on the admin listener.
 ///
-/// The admin API is enabled by default, so the route is mounted. Without a
-/// `DistributedRuntime` wired into the service the handler cannot reach workers,
-/// so it responds `503 Service Unavailable` with a clear message — proving the
-/// route is wired up rather than silently missing (the original bug in #6291 was
-/// a `404` on this control) while still signalling the failure via the status
-/// code rather than masking it behind a `200`.
+/// The admin API is off by default and is not served on the inference port. With
+/// it enabled, and without a `DistributedRuntime` wired into the service, the
+/// handler cannot reach workers, so it responds `503 Service Unavailable` with a
+/// clear message — proving the route is wired up rather than silently missing
+/// (the original bug in #6291 was a `404` on this control) while still signalling
+/// the failure via the status code rather than masking it behind a `200`.
 #[tokio::test]
 async fn test_reset_prefix_cache_route_is_registered() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let (admin_listener, admin_port) = bind_random_port().await;
+    drop(admin_listener);
+    let service = HttpService::builder()
+        .port(port)
+        .enable_admin_api(true)
+        .admin_port(admin_port)
+        .build()
+        .unwrap();
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
@@ -4447,8 +4454,20 @@ async fn test_reset_prefix_cache_route_is_registered() {
         tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
     wait_for_service_ready(port).await;
 
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let inference = client
         .post(format!("http://localhost:{port}/reset_prefix_cache"))
+        .send()
+        .await
+        .expect("POST /reset_prefix_cache on the inference port");
+    assert_eq!(
+        inference.status(),
+        StatusCode::NOT_FOUND,
+        "POST /reset_prefix_cache is an admin route and must not be served on the inference port"
+    );
+
+    let response = client
+        .post(format!("http://127.0.0.1:{admin_port}/reset_prefix_cache"))
         .send()
         .await
         .expect("POST /reset_prefix_cache");
@@ -4459,7 +4478,7 @@ async fn test_reset_prefix_cache_route_is_registered() {
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "without a runtime, POST /reset_prefix_cache should be routed (admin API on by default) and return 503 rather than 404; got {status}, body: {text}"
+        "without a runtime, POST /reset_prefix_cache on the admin listener should return 503 rather than 404; got {status}, body: {text}"
     );
     assert!(
         text.contains("Distributed runtime not available"),
@@ -4504,7 +4523,7 @@ async fn test_reject_media_disabled_preserves_anthropic_model_lookup_precedence(
         .json(&serde_json::json!({
             "model": "unregistered", "max_tokens": 16,
             "messages": [{"role": "user", "content": [{
-                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png", "media_type": "image/png", "data": ""}
+                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}
             }]}]
         }))
         .send()
