@@ -176,10 +176,11 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
+    dynamo_wheel="$(ls /opt/dynamo/wheelhouse/ai_dynamo-*any.whl)" && \
     uv pip install \
     --overrides /tmp/overrides.frontend.txt \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    "${dynamo_wheel}[aisimulate]" && \
     # The meta package requires both backends unconditionally (its cu12/cu13
     # extras are vestigial), so install the backend first and the meta module
     # --no-deps to keep a single CUDA build and one libnixl_capi.so.

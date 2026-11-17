@@ -27,7 +27,12 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+try:
+    from aisimulate.config.common import Choices, IntegerRange, NumericRange
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 from pydantic import BaseModel, Discriminator, Tag
 
 SCALAR = Tag("scalar")

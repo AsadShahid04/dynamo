@@ -18,18 +18,23 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.runner import (
-    EngineReplayRunnerFactory,
-    materialize_engine_launch_config,
-)
-from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
-    HookCapability,
-    ReplayOutputRequirements,
-    ReplayReport,
-    ReplaySpec,
-    RunnerCapabilities,
-)
+try:
+    from aisimulate.runner import (
+        EngineReplayRunnerFactory,
+        materialize_engine_launch_config,
+    )
+    from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
+    from aisimulate.sweeper.replay import (
+        HookCapability,
+        ReplayOutputRequirements,
+        ReplayReport,
+        ReplaySpec,
+        RunnerCapabilities,
+    )
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config

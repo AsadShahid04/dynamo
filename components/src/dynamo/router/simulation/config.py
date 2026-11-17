@@ -9,7 +9,12 @@ import math
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, NumericRange
+try:
+    from aisimulate.config.common import Choices, NumericRange
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dynamo.aisimulate.domains import (

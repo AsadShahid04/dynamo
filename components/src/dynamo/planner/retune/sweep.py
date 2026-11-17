@@ -48,7 +48,12 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from aisimulate.sweeper import OptimizationTarget, objective_value
+try:
+    from aisimulate.sweeper import OptimizationTarget, objective_value
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from dynamo.planner.config.planner_config import (
     PlannerConfig,

@@ -115,9 +115,10 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # uv handles its own locking for the cache, no need to add sharing=locked
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    dynamo_wheel="$(ls /opt/dynamo/wheelhouse/ai_dynamo-*any.whl)" && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    "${dynamo_wheel}[aisimulate]" \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).

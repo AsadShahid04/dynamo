@@ -30,7 +30,15 @@ def _load_renderer(renderer: str) -> Any:
         module = importlib.import_module(module_name)
         return module.render
     except (AttributeError, ModuleNotFoundError) as exc:
-        raise RuntimeError(f"DGD renderer {renderer!r} is unavailable") from exc
+        from dynamo.common.optional_aisimulate import INSTALL_HINT, missing_aisimulate
+
+        if isinstance(exc, ModuleNotFoundError) and missing_aisimulate(exc):
+            detail = f"{INSTALL_HINT} (missing {exc.name})"
+        else:
+            detail = str(exc)
+        raise RuntimeError(
+            f"DGD renderer {renderer!r} is unavailable: {detail}"
+        ) from exc
 
 
 def render_dgd(

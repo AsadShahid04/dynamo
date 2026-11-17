@@ -33,7 +33,7 @@ def generated_files(root: Path) -> dict[Path, str]:
     project = tomllib.loads((root / "pyproject.toml").read_text())
     python_pins = [
         dependency.split(";", 1)[0].strip()
-        for dependency in project["project"]["dependencies"]
+        for dependency in project["project"]["optional-dependencies"]["aisimulate"]
         if re.match(r"^aisimulate\b", dependency)
     ]
     if python_pins != [f"aisimulate=={pinned}"]:

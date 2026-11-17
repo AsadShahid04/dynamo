@@ -363,7 +363,9 @@ def expand_router_domain(
 
 
 def _check_startup_load_model(public: RouterRetuneConfig, startup: str) -> None:
-    from aisimulate.config.common import Choices
+    from dynamo.common.optional_aisimulate import import_aisimulate
+
+    Choices = import_aisimulate("aisimulate.config.common").Choices
 
     model = public.prefill_load_model
     if (

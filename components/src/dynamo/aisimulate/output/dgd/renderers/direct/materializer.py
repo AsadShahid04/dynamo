@@ -14,11 +14,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from aisimulate.capacity import (
-    DEFAULT_FREE_GPU_MEMORY_FRACTION,
-    DEFAULT_GPU_MEMORY_UTILIZATION,
-    DEFAULT_MEM_FRACTION_STATIC,
-)
+try:
+    from aisimulate.capacity import (
+        DEFAULT_FREE_GPU_MEMORY_FRACTION,
+        DEFAULT_GPU_MEMORY_UTILIZATION,
+        DEFAULT_MEM_FRACTION_STATIC,
+    )
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import update_image

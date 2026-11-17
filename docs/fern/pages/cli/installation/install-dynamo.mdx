@@ -121,6 +121,14 @@ This covers single-machine setups only. Multi-node disaggregated serving additio
 
     See [Release Artifacts](../../reference/general/release-artifacts.mdx) for the complete artifact inventory.
 
+    Simulation, replay, AISimulate-backed profiling, and Planner performance models need the optional extra on Python 3.11–3.13:
+
+    ```bash
+    uv pip install --prerelease=allow "ai-dynamo[aisimulate]"
+    ```
+
+    A base `ai-dynamo` install leaves AISimulate and its scientific Python dependencies out.
+
   </Step>
 
   <Step title="Verify installation">

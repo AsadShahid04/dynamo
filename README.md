@@ -198,6 +198,8 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"
 
 > **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for TRT-LLM-specific instructions.
 
+Simulation, replay, AISimulate-backed profiling, and Planner performance models are not part of the base install. Add the extra: `uv pip install --prerelease=allow "ai-dynamo[aisimulate]"` (Python 3.11–3.13).
+
 Then start the frontend and the matching worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)

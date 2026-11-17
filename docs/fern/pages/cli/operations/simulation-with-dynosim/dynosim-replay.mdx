@@ -24,7 +24,7 @@ project virtual environment:
 
 ```bash
 .venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
-uv pip install -e .
+uv pip install -e ".[aisimulate]"
 ```
 
 Use a release build because simulation is CPU-bound.

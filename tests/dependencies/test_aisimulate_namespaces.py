@@ -144,9 +144,10 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         "optional": True,
         "features": ["python"],
     }
+    assert "aisimulate" not in _requirement_names(root_project["dependencies"])
     requirement = next(
         Requirement(item)
-        for item in root_project["dependencies"]
+        for item in root_project["optional-dependencies"]["aisimulate"]
         if canonicalize_name(Requirement(item).name) == "aisimulate"
     )
     if "git" in canonical_core:

@@ -58,15 +58,21 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, Protocol
 
 import yaml
-from aisimulate.output_adapter import (
-    OUTPUT_ADAPTER_API_VERSION,
-    RecommendationOutputCallbacks,
-)
-from aisimulate.sweeper.config import Candidate as AISCandidate
-from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
-from aisimulate.sweeper.result import SweepResult
-from aisimulate.sweeper.score import pareto_front as ais_pareto_front
-from aisimulate_core.sdk.perf_database import load_system_spec
+
+try:
+    from aisimulate.output_adapter import (
+        OUTPUT_ADAPTER_API_VERSION,
+        RecommendationOutputCallbacks,
+    )
+    from aisimulate.sweeper.config import Candidate as AISCandidate
+    from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
+    from aisimulate.sweeper.result import SweepResult
+    from aisimulate.sweeper.score import pareto_front as ais_pareto_front
+    from aisimulate_core.sdk.perf_database import load_system_spec
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo.aisimulate.output.dgd.renderers import (

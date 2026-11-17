@@ -19,7 +19,6 @@ from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
 import msgspec
-from aisimulate_core.sdk import RustForwardPassPerfModel as AISForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -219,7 +218,11 @@ class AISCoreEnginePerfModel:
     ) -> AISCoreEnginePerfModel:
         if ais_config["worker_type"] != worker_type:
             raise ValueError("AIS worker_type must match the Planner deployment role")
-        model = AISForwardPassPerfModel.best_available(ais_config)
+        from dynamo.common.optional_aisimulate import import_aisimulate
+
+        model = import_aisimulate(
+            "aisimulate_core.sdk"
+        ).RustForwardPassPerfModel.best_available(ais_config)
         return cls(
             model=model,
             worker_type=worker_type,
