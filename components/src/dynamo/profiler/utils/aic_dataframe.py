@@ -24,8 +24,14 @@ are actually accessed; this module populates exactly those columns.
 from __future__ import annotations
 
 import pandas as pd
-from aisimulate.sdk.picking import _build_disagg_summary_dict
-from aisimulate_core.sdk import common
+
+try:
+    from aisimulate.sdk.picking import _build_disagg_summary_dict
+    from aisimulate_core.sdk import common
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 
 def make_parallel_label(tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int) -> str:

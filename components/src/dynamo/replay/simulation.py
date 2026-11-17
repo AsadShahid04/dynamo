@@ -18,18 +18,23 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.runner import (
-    EngineReplayRunnerFactory,
-    materialize_engine_launch_config,
-)
-from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
-    HookCapability,
-    ReplayOutputRequirements,
-    ReplayReport,
-    ReplaySpec,
-    RunnerCapabilities,
-)
+try:
+    from aisimulate.runner import (
+        EngineReplayRunnerFactory,
+        materialize_engine_launch_config,
+    )
+    from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
+    from aisimulate.sweeper.replay import (
+        HookCapability,
+        ReplayOutputRequirements,
+        ReplayReport,
+        ReplaySpec,
+        RunnerCapabilities,
+    )
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config
@@ -106,6 +111,8 @@ class DynamoReplayRunnerFactory:
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             agentic_qualification="functional_only",
+            # The AIS model config carries these to replay timing and capacity.
+            supported_engine_model_controls=("gemm_quant_mode", "kvcache_quant_mode"),
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:

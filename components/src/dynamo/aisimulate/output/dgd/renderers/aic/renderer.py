@@ -22,8 +22,15 @@ def _load_generator_api() -> tuple[Any, Any]:
         generator_api = importlib.import_module("aisimulate.generator.api")
         generator_request = importlib.import_module("aisimulate.generator.request")
     except ModuleNotFoundError as exc:
+        from dynamo.common.optional_aisimulate import INSTALL_HINT, missing_aisimulate
+
+        detail = (
+            f"{INSTALL_HINT} (missing {exc.name})"
+            if missing_aisimulate(exc)
+            else str(exc)
+        )
         raise RuntimeError(
-            "the AIC renderer requires the AISimulate generator"
+            f"the AIC renderer requires the AISimulate generator: {detail}"
         ) from exc
 
     return generator_request.from_sweeper_candidate, generator_api.generate_from_request

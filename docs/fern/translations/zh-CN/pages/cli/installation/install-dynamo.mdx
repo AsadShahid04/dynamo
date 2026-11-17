@@ -143,6 +143,14 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
   </Tab>
 </Tabs>
 
+仿真、回放、基于 AISimulate 的 profiling，以及 Planner 性能模型需要可选 extra（Python 3.11–3.13）：
+
+```bash
+uv pip install --prerelease=allow "ai-dynamo[aisimulate]"
+```
+
+基础 `ai-dynamo` 安装不会拉取 AISimulate 及其科学计算依赖。
+
 ## 运行 Dynamo
 
 ### 发现后端

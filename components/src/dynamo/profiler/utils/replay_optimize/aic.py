@@ -13,8 +13,16 @@ def _load_aisimulate_modules() -> tuple[Any, Any, Any]:
         task = importlib.import_module("aisimulate.sdk.task_v2")
         utils = importlib.import_module("aisimulate_core.sdk.utils")
     except ModuleNotFoundError as exc:
+        from dynamo.common.optional_aisimulate import INSTALL_HINT, missing_aisimulate
+
+        detail = (
+            f"{INSTALL_HINT} (missing {exc.name})"
+            if missing_aisimulate(exc)
+            else str(exc)
+        )
         raise RuntimeError(
-            "AISimulate is required to enumerate dense TP candidates for replay optimization"
+            "AISimulate is required to enumerate dense TP candidates for replay "
+            f"optimization: {detail}"
         ) from exc
     return common, task, utils
 

@@ -58,7 +58,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         libstdc++6 \
         # required by EPP's embedded ZMQ KV-event/replica-sync subscriber
-        # (dynamo-kv-router's standalone-selection feature); matches the
+        # (dynamo-kv-router's ingest-zmq and replica-sync-zmq features); matches the
         # runtime dep installed in deploy/inference-gateway/ext-proc/Dockerfile
         libzmq5 \
         # required for verification of GPG keys
@@ -67,8 +67,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git \
         # compliance audit bootstraps syft over HTTPS
         curl \
-        # lets Dynamo processes opt into jemalloc via
-        # LD_PRELOAD or DYN_FRONTEND_JEMALLOC; not preloaded by default
+        # lets CPython and C code opt into jemalloc via
+        # LD_PRELOAD; not preloaded by default
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
@@ -154,12 +154,15 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 # Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving,
 # plus AIC core for the experimental router-side prefill-load model.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
+# --only-binary python-rapidjson (from tritonclient): this stage has no C++ compiler on
+# purpose, so take the newest release that has a wheel rather than building an sdist.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp/overrides.frontend.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
+        --only-binary python-rapidjson \
         --overrides /tmp/overrides.frontend.txt \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.frontend.txt
@@ -173,10 +176,11 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
+    dynamo_wheel="$(ls /opt/dynamo/wheelhouse/ai_dynamo-*any.whl)" && \
     uv pip install \
     --overrides /tmp/overrides.frontend.txt \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    "${dynamo_wheel}[aisimulate]" && \
     # The meta package requires both backends unconditionally (its cu12/cu13
     # extras are vestigial), so install the backend first and the meta module
     # --no-deps to keep a single CUDA build and one libnixl_capi.so.

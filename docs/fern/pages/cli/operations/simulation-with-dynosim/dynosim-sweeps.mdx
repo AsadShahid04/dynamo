@@ -17,15 +17,15 @@ domain semantics, see the
 ## Prerequisites
 
 Run from the repository root. Create and activate a virtual environment, build the runtime bindings,
-and install Dynamo. The editable Dynamo installation installs the pinned AISimulate release and
-registers the Dynamo-owned `dgd` output adapter:
+and install Dynamo with the `aisimulate` extra. That extra installs the pinned AISimulate
+release. The editable install also registers the Dynamo-owned `dgd` output adapter:
 
 ```bash
 uv venv --python 3.12 .venv
 source .venv/bin/activate
 uv pip install pip 'maturin[patchelf]'
 maturin develop --release -m lib/bindings/python/Cargo.toml
-uv pip install -e .
+uv pip install -e ".[aisimulate]"
 uv pip install scikit-learn==1.7.2
 ```
 

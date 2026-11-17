@@ -19,11 +19,17 @@ import logging
 
 import pandas as pd
 import yaml
-from aisimulate.generator.api import generate_backend_artifacts
-from aisimulate.generator.module_bridge import task_config_to_generator_config
-from aisimulate.generator.naive import build_naive_generator_params
-from aisimulate.legacy_cli.main import _execute_tasks, build_default_tasks
-from aisimulate.sdk.task_v2 import Task
+
+try:
+    from aisimulate.generator.api import generate_backend_artifacts
+    from aisimulate.generator.module_bridge import task_config_to_generator_config
+    from aisimulate.generator.naive import build_naive_generator_params
+    from aisimulate.legacy_cli.main import _execute_tasks, build_default_tasks
+    from aisimulate.sdk.task_v2 import Task
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec

@@ -10,7 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
-from aisimulate.runner import canonical_performance_config
+try:
+    from aisimulate.runner import canonical_performance_config
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from dynamo.mocker.args import resolve_planner_profile_data as _resolve_profile
 from dynamo.mocker.config import normalize_mocker_config

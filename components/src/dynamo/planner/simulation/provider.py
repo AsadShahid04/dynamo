@@ -15,21 +15,26 @@ from dataclasses import replace
 from enum import Enum
 from typing import Any, cast
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import (
-    AdapterReplaySpec,
-    AdapterSearchPlan,
-    CandidateContext,
-    InfeasibleCandidate,
-    JSONValue,
-    RuntimeHookSpec,
-    SearchSpaceFragment,
-    SweepContext,
-)
+try:
+    from aisimulate.config.common import Choices, IntegerRange, NumericRange
+    from aisimulate.config_adapter import (
+        PredictionAdapterContext,
+        RecommendationAdapterContext,
+    )
+    from aisimulate.sweeper.provider import (
+        AdapterReplaySpec,
+        AdapterSearchPlan,
+        CandidateContext,
+        InfeasibleCandidate,
+        JSONValue,
+        RuntimeHookSpec,
+        SearchSpaceFragment,
+        SweepContext,
+    )
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 from pydantic import (
     BaseModel,
     ConfigDict,

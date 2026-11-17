@@ -8,21 +8,26 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 
-from aisimulate.config.common import Choices
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import (
-    AdapterReplaySpec,
-    AdapterSearchPlan,
-    CandidateContext,
-    ConditionalSearchSpace,
-    JSONValue,
-    RuntimeHookSpec,
-    SearchSpaceFragment,
-    SweepContext,
-)
+try:
+    from aisimulate.config.common import Choices
+    from aisimulate.config_adapter import (
+        PredictionAdapterContext,
+        RecommendationAdapterContext,
+    )
+    from aisimulate.sweeper.provider import (
+        AdapterReplaySpec,
+        AdapterSearchPlan,
+        CandidateContext,
+        ConditionalSearchSpace,
+        JSONValue,
+        RuntimeHookSpec,
+        SearchSpaceFragment,
+        SweepContext,
+    )
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from dynamo.aisimulate.domains import ContinuousDomain, expand_domain
 
@@ -103,8 +108,12 @@ def _ais_perf_config_from_candidate(
     # Fixed/polynomial worker timing does not create a worker estimator. The
     # Router may still select an AIS load estimate: use the same Core-owned
     # role request builder, retaining policies, roots and estimator controls.
-    from aisimulate.sweeper.config import SearchSpace
-    from aisimulate.sweeper.forward_pass_estimator import ForwardPassEstimatorResolver
+    from dynamo.common.optional_aisimulate import import_aisimulate
+
+    SearchSpace = import_aisimulate("aisimulate.sweeper.config").SearchSpace
+    ForwardPassEstimatorResolver = import_aisimulate(
+        "aisimulate.sweeper.forward_pass_estimator"
+    ).ForwardPassEstimatorResolver
 
     request_space = dict(core_search_space)
     request_space.setdefault("model_name", sample["model_name"])
@@ -127,7 +136,11 @@ def _ais_perf_config_from_prediction(
         return None
     from dataclasses import fields
 
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from dynamo.common.optional_aisimulate import import_aisimulate
+
+    ForwardPassPerfModelConfig = import_aisimulate(
+        "aisimulate_core.sdk"
+    ).ForwardPassPerfModelConfig
 
     engine = context.engine
     role = (

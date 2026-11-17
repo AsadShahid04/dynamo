@@ -82,13 +82,13 @@ cd lib/bindings/python
 # Minimal build
 maturin develop --uv
 
-# Build with the same features as the release wheels
-maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
+# Build with the release wheel features, except media-ffmpeg
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx
 ```
 
-最小构建不包含[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 的以下 features：独立的 KV indexer、slot tracker 和 select service（部分 router 测试会启动它们）、多模态 KV 路由、AISimulate 性能模型以及 S3 请求追踪。
+最小构建不包含[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 的以下 features：独立的 KV indexer、slot tracker 和 select service（部分 router 测试会启动它们）、多模态 KV 路由、AISimulate 性能模型、S3 请求追踪，以及用于 Nsight Systems profile 的 NVTX 标注。NVTX 标注在设置 `DYN_NVTX` 之前保持关闭；参见 [NVTX Profiling](../../../../../pages/reference/observability/nvtx-profiling.md)。
 
-如需在 Nsight Systems profile 中添加标注，请在 feature 列表中加上 `nvtx`。
+Linux 主发布版 wheel 还启用了 `media-ffmpeg`。上面的命令没有包含它，因为它需要 FFmpeg 开发库；如果已安装这些库，可将其加入 feature 列表。
 
 ## 6. 安装 GPU Memory Service
 
@@ -108,7 +108,7 @@ uv pip install -e .
 ```
 
 > [!NOTE]
-> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。后端附加依赖（`[vllm]` 或 `[sglang]`）会安装运行推理 worker 所需的相应框架依赖。对于 TensorRT-LLM 后端，请改用 `tensorrtllm-runtime` 容器，而不是通过 `uv pip` 安装，以确保安装正确的依赖。更多详情请参阅[本地安装](../../cli/installation/install-dynamo.mdx)。
+> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。后端附加依赖（`[vllm]` 或 `[sglang]`）会安装运行推理 worker 所需的相应框架依赖。仿真、回放、基于 AISimulate 的 profiling，以及 Planner 性能模型需要 `uv pip install -e ".[aisimulate]"`（Python 3.11–3.13）。对于 TensorRT-LLM 后端，请改用 `tensorrtllm-runtime` 容器，而不是通过 `uv pip` 安装，以确保安装正确的依赖。更多详情请参阅[本地安装](../../cli/installation/install-dynamo.mdx)。
 
 ## 8. 验证构建
 

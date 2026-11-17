@@ -82,13 +82,13 @@ cd lib/bindings/python
 # Minimal build
 maturin develop --uv
 
-# Build with the same features as the release wheels
-maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
+# Build with the release wheel features, except media-ffmpeg
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx
 ```
 
-The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model and S3 request traces.
+The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model, S3 request traces, and the NVTX ranges for Nsight Systems profiles. The NVTX ranges stay off until you set `DYN_NVTX`; see [NVTX Profiling](../../reference/observability/nvtx-profiling.md).
 
-To annotate Nsight Systems profiles, add `nvtx` to the feature list.
+The main Linux release wheel also enables `media-ffmpeg`. The command above leaves it out because it needs the FFmpeg development libraries; add it to the feature list if you have them installed.
 
 ## 6. Install GPU Memory Service
 
@@ -108,7 +108,7 @@ uv pip install -e .
 ```
 
 > [!NOTE]
-> The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker. For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](../../cli/installation/install-dynamo.mdx) for more details.
+> The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker. Simulation, replay, AISimulate-backed profiling, and Planner performance models need `uv pip install -e ".[aisimulate]"` (Python 3.11–3.13). For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](../../cli/installation/install-dynamo.mdx) for more details.
 
 ## 8. Verify the Build
 

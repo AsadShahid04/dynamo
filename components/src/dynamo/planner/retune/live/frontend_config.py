@@ -2331,7 +2331,15 @@ def _model_warning(model: str) -> Optional[str]:
         # Optional dependency of a warn-only premise: without it, P6 is not
         # checked.
         from aisimulate_core.sdk.common import DefaultHFModels
-    except ImportError:
+    except ImportError as exc:
+        if isinstance(exc, ModuleNotFoundError):
+            from dynamo.common.optional_aisimulate import (
+                INSTALL_HINT,
+                missing_aisimulate,
+            )
+
+            if missing_aisimulate(exc):
+                logger.info("%s", INSTALL_HINT)
         return None
     except Exception as error:  # noqa: BLE001 - evaluate_premises never raises
         logger.exception("live retune could not load AISimulate's default HF models")

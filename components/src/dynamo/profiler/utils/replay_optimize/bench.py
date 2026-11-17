@@ -26,9 +26,10 @@ def compare_aic_and_replay_disagg(
             "requestCount and concurrency"
         )
 
-    # Deferred: AISimulate is optional, so the package must import without it
-    # (mirrors aic._load_aisimulate_modules). Only this function needs AIC.
-    from aisimulate.sdk.task_v2 import Task
+    # Deferred: AISimulate is an optional extra, so this package imports without it.
+    from dynamo.common.optional_aisimulate import import_aisimulate
+
+    Task = import_aisimulate("aisimulate.sdk.task_v2").Task
 
     aic_task = Task(
         serving_mode="disagg",

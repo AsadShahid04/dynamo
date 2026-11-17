@@ -25,13 +25,14 @@ logger.addHandler(console_handler)
 
 def _try_import_aisimulate_core():
     """Load the AISimulate core estimator SDK on demand."""
-    # Lazy-import AISimulate because it is an optional dependency.
-    import aisimulate_core.sdk.backends.factory
-    import aisimulate_core.sdk.config
-    import aisimulate_core.sdk.models
-    import aisimulate_core.sdk.perf_database
+    # Lazy-import AISimulate because it is an optional extra.
+    from dynamo.common.optional_aisimulate import import_aisimulate
 
-    return aisimulate_core
+    import_aisimulate("aisimulate_core.sdk.backends.factory")
+    import_aisimulate("aisimulate_core.sdk.config")
+    import_aisimulate("aisimulate_core.sdk.models")
+    import_aisimulate("aisimulate_core.sdk.perf_database")
+    return import_aisimulate("aisimulate_core")
 
 
 class AIConfiguratorPerfEstimator:

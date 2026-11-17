@@ -139,6 +139,8 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"   # 或 [vllm]
 
 > **注意：** TensorRT-LLM 需要配合 `--extra-index-url https://pypi.nvidia.com` 使用 `pip`。TRT-LLM 专用说明请参阅[安装指南](docs/fern/pages/cli/installation/install-dynamo.mdx)。
 
+仿真、回放、基于 AISimulate 的 profiling，以及 Planner 性能模型不属于基础安装。请额外安装：`uv pip install --prerelease=allow "ai-dynamo[aisimulate]"`（Python 3.11–3.13）。
+
 然后按上面的方式启动 frontend 和一个 worker。系统依赖和后端专用说明请参阅[完整安装指南](docs/fern/pages/cli/installation/install-dynamo.mdx)。
 
 ### 选项 C：Kubernetes（推荐）

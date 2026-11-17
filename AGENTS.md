@@ -132,6 +132,8 @@ maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routin
 cd -
 uv pip install -e lib/gpu_memory_service
 uv pip install -e .
+# Simulation, replay, and AISimulate-backed Planner models:
+# uv pip install -e ".[aisimulate]"
 python3 -m dynamo.frontend --help   # verify
 ```
 

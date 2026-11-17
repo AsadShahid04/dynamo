@@ -87,7 +87,7 @@ maturin develop --release \
   --features ais-forward-pass
 popd >/dev/null
 
-uv pip install -e "$dynamo_dir" -e "$gym_dir[sim]"
+uv pip install -e "$dynamo_dir[aisimulate]" -e "$gym_dir[sim]"
 
 python - <<'PY'
 import inspect

@@ -10,7 +10,12 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+try:
+    from aisimulate.config.common import Choices, IntegerRange, NumericRange
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from dynamo.aisimulate.domains import CHOICE_FORM, CHOICES, KNOB_FORM, RANGE, SCALAR

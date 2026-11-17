@@ -20,15 +20,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
-from aisimulate_core.datasets import prepare_execution_profile
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
-
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
     ForwardPassMetrics,
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
+from dynamo.common.optional_aisimulate import import_aisimulate, missing_aisimulate
 from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.perf_model.engine_query import (
@@ -159,6 +157,8 @@ class PlannerEnginePerfModel:
             )
             self._engine_model_key = model_key
         except _ENGINE_MODEL_INIT_EXCEPTIONS as e:
+            if isinstance(e, ModuleNotFoundError) and missing_aisimulate(e):
+                raise
             logger.warning(
                 "Failed to initialize AIS engine perf model for %s; "
                 "perf model will stay unavailable until capabilities/config are fixed: %s",
@@ -255,7 +255,9 @@ class PlannerEnginePerfModel:
         if key != self._profile_source:
             directory = TemporaryDirectory(prefix="dynamo-ais-profile-")
             try:
-                prepared = prepare_execution_profile(
+                prepared = import_aisimulate(
+                    "aisimulate_core.datasets"
+                ).prepare_execution_profile(
                     Path(source.root),
                     source.manifest,
                     Path(directory.name) / "prepared",
@@ -279,7 +281,7 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             config = asdict(
-                ForwardPassPerfModelConfig(
+                import_aisimulate("aisimulate_core.sdk").ForwardPassPerfModelConfig(
                     model=self._config.model_name
                     or f"dynamo-planner:{self._config.namespace}",
                     system="unprofiled",
@@ -315,18 +317,22 @@ class PlannerEnginePerfModel:
 
         # Reuse upstream's legacy-options migration, including bucket_count's
         # square-root mapping (16 total buckets means a 4 by 4 grid).
-        defaults = ForwardPassPerfModelConfig.from_legacy_engine_config(
-            {
-                "schema_version": 1,
-                "model_name": config["model"],
-                "system_name": config["system"],
-                "backend": config["backend"],
-                "tp_size": config["tp"],
-                "pp_size": config["pp"],
-            },
-            self._worker_type,
-            self._build_options(),
-        ).estimator_config
+        defaults = (
+            import_aisimulate("aisimulate_core.sdk")
+            .ForwardPassPerfModelConfig.from_legacy_engine_config(
+                {
+                    "schema_version": 1,
+                    "model_name": config["model"],
+                    "system_name": config["system"],
+                    "backend": config["backend"],
+                    "tp_size": config["tp"],
+                    "pp_size": config["pp"],
+                },
+                self._worker_type,
+                self._build_options(),
+            )
+            .estimator_config
+        )
         config["estimator_config"] = _merge_estimator_controls(
             defaults, config.get("estimator_config", {})
         )

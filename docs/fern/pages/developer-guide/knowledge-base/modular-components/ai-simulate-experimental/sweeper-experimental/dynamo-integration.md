@@ -40,9 +40,10 @@ together. A Git-pinned dependency builds AISimulate from source and requires its
 toolchain. Such development pins do not imply that a matching release wheel or crate is published;
 container builds require the published pair and matching release pins.
 
-On supported Python versions, `ai-dynamo` declares AISimulate as a base dependency. Keep that pin,
+On supported Python versions, install AISimulate with the `aisimulate` extra:
+`pip install "ai-dynamo[aisimulate]"`. A base `ai-dynamo` install leaves that stack out. Keep that pin,
 `container/deps/requirements.aisimulate.txt`, and the `aisimulate-core` Cargo pins aligned when
-upgrading. No `ai-dynamo[simulation]` extra is required.
+upgrading. The extra name is `aisimulate`.
 
 ## Run the Unified CLI
 

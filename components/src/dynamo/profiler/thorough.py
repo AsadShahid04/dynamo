@@ -21,9 +21,15 @@ from itertools import chain
 
 import pandas as pd
 import yaml
-from aisimulate.generator.enumerate import enumerate_profiling_configs
-from aisimulate.sdk.picking import pick_autoscale, pick_default, pick_load_match
-from aisimulate.sdk.task_v2 import Task
+
+try:
+    from aisimulate.generator.enumerate import enumerate_profiling_configs
+    from aisimulate.sdk.picking import pick_autoscale, pick_default, pick_load_match
+    from aisimulate.sdk.task_v2 import Task
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.profiler.rapid import _generate_dgd_from_pick

@@ -20,8 +20,14 @@ import os
 from typing import Any
 
 import yaml
-from aisimulate.generator.enumerate import check_model_hardware_support
-from aisimulate_core.sdk.utils import get_model_config_from_model_path
+
+try:
+    from aisimulate.generator.enumerate import check_model_hardware_support
+    from aisimulate_core.sdk.utils import get_model_config_from_model_path
+except ModuleNotFoundError as exc:
+    from dynamo.common.optional_aisimulate import reraise_missing_aisimulate
+
+    reraise_missing_aisimulate(exc)
 
 from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation

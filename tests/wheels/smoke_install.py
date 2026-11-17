@@ -461,6 +461,15 @@ def install_core(wheelhouse: Path, python_spec: str) -> None:
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
         run_core_import_smoke(venv_python)
+        run(
+            [
+                str(venv_python),
+                "-c",
+                "import importlib.metadata as metadata\n"
+                "names = {dist.metadata['Name'].lower() for dist in metadata.distributions()}\n"
+                "assert 'aisimulate' not in names, sorted(names)\n",
+            ]
+        )
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
 
@@ -471,12 +480,11 @@ def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
 
     venv_python = create_venv(python_spec)
     try:
-        # AISimulate is a direct ai-dynamo dependency on supported Python versions
-        # and provides the canonical estimator used by Mocker.
+        # Mocker's canonical estimator comes from the optional AISimulate extra.
         pip_install(
             venv_python,
             wheelhouse,
-            [str(runtime), str(ai_dynamo)],
+            [str(runtime), f"{ai_dynamo}[aisimulate]"],
         )
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)

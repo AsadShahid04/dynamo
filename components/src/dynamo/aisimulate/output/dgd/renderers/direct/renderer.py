@@ -29,8 +29,15 @@ def _load_materializer() -> tuple[type[Exception], Any]:
             materializer.materialize_dgd_from_candidate,
         )
     except (AttributeError, ModuleNotFoundError) as exc:
+        from dynamo.common.optional_aisimulate import INSTALL_HINT, missing_aisimulate
+
+        if isinstance(exc, ModuleNotFoundError) and missing_aisimulate(exc):
+            detail = f"{INSTALL_HINT} (missing {exc.name})"
+        else:
+            detail = str(exc)
         raise RuntimeError(
-            "the direct renderer requires a complete Dynamo Python installation"
+            "the direct renderer requires a complete Dynamo Python installation: "
+            f"{detail}"
         ) from exc
 
 

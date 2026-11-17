@@ -68,8 +68,8 @@ AIConfigurator evaluates two deployment architectures and recommends the best on
 
 ## Quick Start
 
-Use Python 3.11 through 3.13. Run the installation command from the Dynamo checkout root to use
-the AISimulate dependency declared by that checkout.
+Use Python 3.11 through 3.13. AISimulate is the `ai-dynamo[aisimulate]` extra, not a base
+dependency. From a Dynamo checkout, the requirements file below installs that same pin.
 
 ```bash
 # Install the distribution that provides the compatibility command
