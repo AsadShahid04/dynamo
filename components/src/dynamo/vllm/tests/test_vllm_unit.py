@@ -30,7 +30,7 @@ from dynamo.vllm.args import (
     parse_args,
     update_engine_config_with_dynamo,
 )
-from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.constants import MX_LOAD_FORMATS, DisaggregationMode
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
