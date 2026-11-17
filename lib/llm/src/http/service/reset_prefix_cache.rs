@@ -35,8 +35,9 @@
 //! unscoped request flushes every namespace it can see; pass `namespace` to
 //! restrict the blast radius to a single tenant.
 //!
-//! This route is part of the frontend admin API and is only registered when the
-//! admin API is enabled (see `DYN_DISABLE_FRONTEND_ADMIN_API`).
+//! This route is part of the frontend admin API. It is served on the admin
+//! listener (not the inference port) and is only registered when the admin API
+//! is enabled (`DYN_ENABLE_FRONTEND_ADMIN_API` or `HttpServiceConfig::enable_admin_api`).
 
 use super::{RouteDoc, service_v2};
 use axum::{

@@ -39,6 +39,7 @@ pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod reset_prefix_cache;
+pub mod response_headers;
 pub mod router_policy;
 pub mod service_v2;
 pub mod systemone;
@@ -47,7 +48,7 @@ mod worker_metrics;
 pub use axum;
 pub use frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
-    validate_extension_route_path,
+    validate_extension_route_method, validate_extension_route_path,
 };
 pub use metrics::Metrics;
 
