@@ -2438,6 +2438,82 @@ mod tests {
         );
     }
 
+    /// Mid-stream failover records a new worker on the same tracker. `nvext.worker_id`
+    /// is read from that tracker, so the worker producing the retry's tokens replaces
+    /// the worker that disconnected.
+    #[tokio::test]
+    async fn migrated_request_tracker_names_the_worker_producing_tokens() {
+        use crate::protocols::common::timing::WORKER_TYPE_DECODE;
+
+        struct RecordingRouter {
+            inner: Arc<MockEngine>,
+            workers: Vec<u64>,
+            calls: AtomicU32,
+        }
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for RecordingRouter
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+                let worker_id = self.workers[call];
+                if let Some(tracker) = request.tracker.as_ref() {
+                    tracker.record_worker(worker_id, Some(call as u32), WORKER_TYPE_DECODE);
+                }
+                self.inner.generate(request).await
+            }
+        }
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let tracker = Arc::new(RequestTracker::new());
+        let mut request = create_mock_request(10);
+        request.tracker = Some(tracker.clone());
+        let engine = Arc::new(RecordingRouter {
+            inner: Arc::new(MockEngine::new(
+                MockBehavior::MidStreamFail { fail_after: 5 },
+                10,
+                100,
+                context_id.clone(),
+            )),
+            workers: vec![11, 22],
+            calls: AtomicU32::new(0),
+        });
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            engine;
+
+        let ctx = Arc::new(Controller::new(context_id));
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            BTreeMap::new(),
+            request,
+            next_generate,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = 0;
+        while let Some(response) = retry_manager.next().await {
+            assert!(response.err().is_none());
+            responses += 1;
+        }
+        assert_eq!(responses, 10);
+
+        let info = tracker.get_worker_info().expect("worker info");
+        assert_eq!(info.prefill_worker_id, Some(22));
+        assert_eq!(info.decode_worker_id, Some(22));
+        assert_eq!(info.decode_dp_rank, Some(1));
+        assert_eq!(info.previous_worker_ids, vec![11]);
+    }
+
     #[tokio::test]
     async fn retry_rebases_min_tokens_from_the_delivered_prefix() {
         let context_id = uuid::Uuid::new_v4().to_string();

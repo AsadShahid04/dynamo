@@ -262,7 +262,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 
 | Field | Requested Via | Description |
 |-------|---------------|-------------|
-| `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
+| `worker_id` | `extra_fields: ["worker_id"]` | Prefill and decode worker IDs and data parallel ranks for the workers currently serving the request. After a migration, the IDs name the worker producing later tokens. `previous_worker_ids` lists workers the request left, oldest first, and is omitted when the request stayed on its first worker. |
 | `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Backend-specific routed expert capture payload returned by compatible vLLM and SGLang engines. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |

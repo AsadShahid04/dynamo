@@ -606,6 +606,10 @@ pub fn routing_constraints_to_kv(
 }
 
 /// Worker ID information for disaggregated serving.
+///
+/// `prefill_worker_id` and `decode_worker_id` name the workers currently serving
+/// those phases. After a migration they follow the worker producing later tokens.
+/// `previous_worker_ids` lists workers the request left, oldest first.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WorkerIdInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -619,6 +623,11 @@ pub struct WorkerIdInfo {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_dp_rank: Option<u32>,
+
+    /// Workers replaced by a later routing decision, oldest first.
+    /// Omitted when the request stayed on its first worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_worker_ids: Vec<u64>,
 }
 
 /// NVIDIA LLM response extensions.
@@ -2025,6 +2034,7 @@ mod tests {
             prefill_dp_rank: Some(1),
             decode_worker_id: Some(9),
             decode_dp_rank: Some(2),
+            previous_worker_ids: Vec::new(),
         });
         tracker
     }
@@ -2064,6 +2074,50 @@ mod tests {
     }
 
     #[test]
+    fn build_response_nvext_worker_id_follows_a_migrated_worker() {
+        use crate::protocols::common::timing::WORKER_TYPE_DECODE;
+
+        let selection = NvExtResponseFieldSelection {
+            worker_id: true,
+            ..Default::default()
+        };
+        let tracker = std::sync::Arc::new(crate::protocols::common::timing::RequestTracker::new());
+        tracker.record_worker(11, Some(0), WORKER_TYPE_DECODE);
+
+        let before = selection
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
+            .expect("worker_id");
+        assert_eq!(
+            before.worker_id.as_ref().unwrap().decode_worker_id,
+            Some(11)
+        );
+        assert!(
+            before
+                .worker_id
+                .as_ref()
+                .unwrap()
+                .previous_worker_ids
+                .is_empty()
+        );
+
+        tracker.record_worker(22, Some(1), WORKER_TYPE_DECODE);
+        let after = selection
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
+            .expect("worker_id after migration");
+        let worker = after.worker_id.expect("worker_id");
+        assert_eq!(worker.prefill_worker_id, Some(22));
+        assert_eq!(worker.decode_worker_id, Some(22));
+        assert_eq!(worker.decode_dp_rank, Some(1));
+        assert_eq!(worker.previous_worker_ids, vec![11]);
+    }
+
+    #[test]
     fn build_response_nvext_surfaces_forwarded_split_router_worker_id() {
         let selection = NvExtResponseFieldSelection {
             worker_id: true,
@@ -2085,6 +2139,7 @@ mod tests {
                 prefill_dp_rank: Some(1),
                 decode_worker_id: Some(9),
                 decode_dp_rank: Some(2),
+                previous_worker_ids: Vec::new(),
             })
         );
     }
