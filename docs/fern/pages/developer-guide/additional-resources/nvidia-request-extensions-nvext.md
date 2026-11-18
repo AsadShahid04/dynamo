@@ -228,6 +228,8 @@ How it works:
 3. The constructed prompt is tokenized and sent as a `max_tokens=1` request to warm the KV cache on a worker.
 4. When the actual next request arrives, it benefits from the already-warm KV cache, reducing TTFT.
 
+Warmup rendering retains the current request's tool definitions, tool choice, response format, and effective chat-template arguments, including thinking controls. Cache reuse depends on the next request using compatible settings and on how the formatter renders completed history.
+
 ```json
 {
     "nvext": {
@@ -242,7 +244,7 @@ Backend details:
 
 - **SGLang**: Requires [`--enable-priority-scheduling`](../knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-scheduling) for queue ordering and [`--radix-eviction-policy priority`](../knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-based-kv-cache-eviction) for priority-based eviction.
 - **vLLM**: Requires [`--scheduling-policy priority`](../knowledge-base/modular-components/backends/vllm/reference-guide.md#priority-scheduling).
-- **TensorRT-LLM**: Does not currently support per-request priority.
+- **TensorRT-LLM**: Requires `--trtllm.scheduler_config.waiting_queue_policy priority` for queue ordering. Dynamo maps `priority` onto TensorRT-LLM's 0.0 to 1.0 scale; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx). Priority-based eviction is not supported.
 
 ```json
 {
@@ -260,7 +262,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 
 | Field | Requested Via | Description |
 |-------|---------------|-------------|
-| `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
+| `worker_id` | `extra_fields: ["worker_id"]` | Prefill and decode worker IDs and data parallel ranks for the workers currently serving the request. After a migration, the IDs name the worker producing later tokens. `previous_worker_ids` lists workers the request left, oldest first, and is omitted when the request stayed on its first worker. |
 | `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Backend-specific routed expert capture payload returned by compatible vLLM and SGLang engines. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |

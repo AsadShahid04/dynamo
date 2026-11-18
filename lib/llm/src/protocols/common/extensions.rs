@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::HeaderMap;
 use derive_builder::Builder;
@@ -292,6 +293,8 @@ pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+/// Milliseconds a gateway in front of this process held the request before forwarding it.
+pub const HEADER_ELAPSED_SINCE_ARRIVAL_MS: &str = "x-dynamo-elapsed-since-arrival-ms";
 pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 // Compatibility aliases for the original unprefixed names. Future agents may remove these after
 // the deprecation window.
@@ -326,6 +329,7 @@ pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
         HEADER_PREFILL_DP_RANK_ALIAS,
         HEADER_REQUEST_PRIORITY,
         HEADER_REQUEST_STRICT_PRIORITY,
+        HEADER_ELAPSED_SINCE_ARRIVAL_MS,
     ]
     .iter()
     .any(|header| headers.contains_key(*header))
@@ -347,6 +351,9 @@ pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
 
 pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
 
+/// Context key of the [`Duration`] from [`upstream_elapsed_from_headers`].
+pub const UPSTREAM_ELAPSED_CONTEXT_KEY: &str = "dynamo.llm.upstream_elapsed";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionAffinityId(String);
 
@@ -366,6 +373,21 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 
 pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
     session_affinity_header_value(headers).map(SessionAffinityId::new)
+}
+
+/// How long a gateway had held the request when it forwarded it here, from
+/// `x-dynamo-elapsed-since-arrival-ms`. The Runtime EPP sets the header, overwriting any value
+/// the client sent, so that the request's arrival age covers the time it spent in the EPP's
+/// router queue. A value that is not a finite, non-negative number is ignored.
+pub fn upstream_elapsed_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    let millis = headers
+        .get(HEADER_ELAPSED_SINCE_ARRIVAL_MS)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    Duration::try_from_secs_f64(millis / 1000.0).ok()
 }
 
 /// Apply HTTP routing header overrides to nvext.
@@ -576,14 +598,18 @@ pub fn request_cache_salt<R: NvExtProvider>(request: &R) -> Option<&str> {
 
 pub fn routing_constraints_to_kv(
     constraints: RoutingConstraints,
-) -> dynamo_kv_router::protocols::RoutingConstraints {
-    dynamo_kv_router::protocols::RoutingConstraints {
+) -> dynamo_scheduler::host::RoutingConstraints {
+    dynamo_scheduler::host::RoutingConstraints {
         required_taints: constraints.required_taints,
         preferred_taints: constraints.preferred_taints,
     }
 }
 
 /// Worker ID information for disaggregated serving.
+///
+/// `prefill_worker_id` and `decode_worker_id` name the workers currently serving
+/// those phases. After a migration they follow the worker producing later tokens.
+/// `previous_worker_ids` lists workers the request left, oldest first.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WorkerIdInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -597,6 +623,11 @@ pub struct WorkerIdInfo {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_dp_rank: Option<u32>,
+
+    /// Workers replaced by a later routing decision, oldest first.
+    /// Omitted when the request stayed on its first worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_worker_ids: Vec<u64>,
 }
 
 /// NVIDIA LLM response extensions.
@@ -1852,6 +1883,27 @@ mod tests {
     }
 
     #[test]
+    fn upstream_elapsed_header_accepts_only_a_finite_non_negative_age() {
+        let parse = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(HEADER_ELAPSED_SINCE_ARRIVAL_MS, value.parse().unwrap());
+            upstream_elapsed_from_headers(&headers)
+        };
+        assert_eq!(parse("1500"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse(" 0.250 "), Some(Duration::from_micros(250)));
+        assert_eq!(parse("0"), Some(Duration::ZERO));
+        for invalid in ["-1", "nan", "inf", "soon", ""] {
+            assert_eq!(parse(invalid), None, "{invalid:?}");
+        }
+        assert_eq!(upstream_elapsed_from_headers(&HeaderMap::new()), None);
+
+        // It is a routing header, so the disabled-NvExt warning covers it.
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_ELAPSED_SINCE_ARRIVAL_MS, "1500".parse().unwrap());
+        assert!(has_non_cache_salt_routing_headers(&headers));
+    }
+
+    #[test]
     fn apply_header_routing_overrides_ignores_session_identity_headers() {
         use axum::http::{HeaderMap, HeaderName};
 
@@ -1982,6 +2034,7 @@ mod tests {
             prefill_dp_rank: Some(1),
             decode_worker_id: Some(9),
             decode_dp_rank: Some(2),
+            previous_worker_ids: Vec::new(),
         });
         tracker
     }
@@ -2021,6 +2074,50 @@ mod tests {
     }
 
     #[test]
+    fn build_response_nvext_worker_id_follows_a_migrated_worker() {
+        use crate::protocols::common::timing::WORKER_TYPE_DECODE;
+
+        let selection = NvExtResponseFieldSelection {
+            worker_id: true,
+            ..Default::default()
+        };
+        let tracker = std::sync::Arc::new(crate::protocols::common::timing::RequestTracker::new());
+        tracker.record_worker(11, Some(0), WORKER_TYPE_DECODE);
+
+        let before = selection
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
+            .expect("worker_id");
+        assert_eq!(
+            before.worker_id.as_ref().unwrap().decode_worker_id,
+            Some(11)
+        );
+        assert!(
+            before
+                .worker_id
+                .as_ref()
+                .unwrap()
+                .previous_worker_ids
+                .is_empty()
+        );
+
+        tracker.record_worker(22, Some(1), WORKER_TYPE_DECODE);
+        let after = selection
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
+            .expect("worker_id after migration");
+        let worker = after.worker_id.expect("worker_id");
+        assert_eq!(worker.prefill_worker_id, Some(22));
+        assert_eq!(worker.decode_worker_id, Some(22));
+        assert_eq!(worker.decode_dp_rank, Some(1));
+        assert_eq!(worker.previous_worker_ids, vec![11]);
+    }
+
+    #[test]
     fn build_response_nvext_surfaces_forwarded_split_router_worker_id() {
         let selection = NvExtResponseFieldSelection {
             worker_id: true,
@@ -2042,6 +2139,7 @@ mod tests {
                 prefill_dp_rank: Some(1),
                 decode_worker_id: Some(9),
                 decode_dp_rank: Some(2),
+                previous_worker_ids: Vec::new(),
             })
         );
     }
