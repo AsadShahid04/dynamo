@@ -505,6 +505,105 @@ func TestDGDCheckpointsReconciler_SnapshotJobAppliesDGDDefaults(t *testing.T) {
 	})
 }
 
+func TestDGDCheckpointsReconciler_ActiveDeadlineSeconds(t *testing.T) {
+	tests := []struct {
+		name string
+		job  *v1beta1.ComponentCheckpointJobConfig
+		want int64
+	}{
+		{name: "defaults to one hour", want: 3600},
+		{
+			name: "job without a deadline keeps one hour",
+			job:  &v1beta1.ComponentCheckpointJobConfig{},
+			want: 3600,
+		},
+		{
+			name: "uses the configured deadline",
+			job: &v1beta1.ComponentCheckpointJobConfig{
+				ActiveDeadlineSeconds: new(int64(7200)),
+			},
+			want: 7200,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Build an automatic checkpoint component")
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client:        fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).Build(),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid"),
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(dynamo.BackendFrameworkVLLM)},
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "checkpoint-writer:latest",
+					}},
+				}},
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled: true,
+					Mode:    v1beta1.CheckpointModeAuto,
+					Job:     test.job,
+				}},
+			}
+
+			t.Log("Create the SnapshotJob")
+			job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
+
+			t.Log("Verify the deadline written onto the new SnapshotJob")
+			require.NotNil(t, job.Spec.ActiveDeadlineSeconds)
+			assert.Equal(t, test.want, *job.Spec.ActiveDeadlineSeconds)
+		})
+	}
+}
+
+func TestDGDCheckpointsReconciler_ActiveDeadlineChangeDoesNotUpdateExistingSnapshotJob(t *testing.T) {
+	t.Log("Create an automatic SnapshotJob with the default deadline")
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid"),
+		Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(dynamo.BackendFrameworkVLLM)},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: "checkpoint-writer:latest",
+			}},
+		}},
+		Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+			Enabled: true,
+			Mode:    v1beta1.CheckpointModeAuto,
+		}},
+	}
+	created := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
+	require.NotNil(t, created.Spec.ActiveDeadlineSeconds)
+	assert.Equal(t, int64(3600), *created.Spec.ActiveDeadlineSeconds)
+
+	t.Log("Raise the component deadline after the SnapshotJob exists")
+	component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{
+		ActiveDeadlineSeconds: new(int64(7200)),
+	}
+	updated := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
+
+	t.Log("Verify the existing SnapshotJob keeps the deadline it was created with")
+	assert.Equal(t, created.Name, updated.Name)
+	require.NotNil(t, updated.Spec.ActiveDeadlineSeconds)
+	assert.Equal(t, int64(3600), *updated.Spec.ActiveDeadlineSeconds)
+}
+
 func TestDGDCheckpointsReconciler_CompatibilityHashChangeRecaptures(t *testing.T) {
 	t.Log("Build an automatic checkpoint component with a stable worker generation")
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -1350,6 +1449,7 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 		commonconsts.MainContainerName,
 		v1alpha1.CheckpointDeletionPolicyRetain,
 		commonconsts.SnapshotGMSModeDisabled,
+		nil,
 	)
 	existing := desired.DeepCopy()
 	existing.Spec.PodTemplate.Spec.Containers[0].Image = "captured:latest"

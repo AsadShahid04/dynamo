@@ -901,6 +901,47 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].experimental.checkpoint: Invalid value: checkpoint.job cannot be set when checkpointRef is specified",
 		},
 		{
+			name: "v1beta1 checkpoint activeDeadlineSeconds is admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Job: &nvidiacomv1beta1.ComponentCheckpointJobConfig{
+							ActiveDeadlineSeconds: new(int64(7200)),
+						},
+					},
+				}
+			}),
+		},
+		{
+			name: "v1beta1 checkpoint activeDeadlineSeconds rejects zero",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Job: &nvidiacomv1beta1.ComponentCheckpointJobConfig{
+							ActiveDeadlineSeconds: new(int64(0)),
+						},
+					},
+				}
+			}),
+			wantSchemaErr: "spec.components[1].experimental.checkpoint.job.activeDeadlineSeconds: Invalid value: 0: spec.components[1].experimental.checkpoint.job.activeDeadlineSeconds in body should be greater than or equal to 1",
+		},
+		{
+			name: "v1alpha1 checkpoint activeDeadlineSeconds rejects zero",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["worker"].Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						ActiveDeadlineSeconds: new(int64(0)),
+					},
+				}
+			}),
+			wantSchemaErr: "spec.services.worker.checkpoint.job.activeDeadlineSeconds: Invalid value: 0: spec.services.worker.checkpoint.job.activeDeadlineSeconds in body should be greater than or equal to 1",
+		},
+		{
 			name: "GMS requires GPU resources on the main container",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)

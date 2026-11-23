@@ -1328,6 +1328,9 @@ func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1bet
 		dst.Job = &v1beta1.ComponentCheckpointJobConfig{
 			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
 		}
+		if src.Job.ActiveDeadlineSeconds != nil {
+			dst.Job.ActiveDeadlineSeconds = new(*src.Job.ActiveDeadlineSeconds)
+		}
 		if src.Job.PodTemplate != nil {
 			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
 		}
@@ -1354,6 +1357,9 @@ func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, ds
 	if src.Job != nil {
 		dst.Job = &ServiceCheckpointJobConfig{
 			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
+		}
+		if src.Job.ActiveDeadlineSeconds != nil {
+			dst.Job.ActiveDeadlineSeconds = new(*src.Job.ActiveDeadlineSeconds)
 		}
 		if src.Job.PodTemplate != nil {
 			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()

@@ -636,7 +636,8 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 							BackendFramework: "vllm",
 						},
 						Job: &v1beta1.ComponentCheckpointJobConfig{
-							GMSClientContainers: []string{"gms-saver"},
+							GMSClientContainers:   []string{"gms-saver"},
+							ActiveDeadlineSeconds: new(int64(7200)),
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{{

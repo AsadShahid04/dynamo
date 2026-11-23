@@ -2252,6 +2252,11 @@ PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125;  Type: object  Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="activeDeadlineSeconds" type="integer">
+ActiveDeadlineSeconds limits how long the automatic SnapshotJob may run, including scheduling, weight loading, quiesce, and dump. Omission keeps the operator default of 3600 seconds. SnapshotJob.spec is immutable, so a change applies only when the operator creates a new SnapshotJob.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="servicecheckpointstatus" title="ServiceCheckpointStatus">
@@ -2622,6 +2627,11 @@ gmsClientContainers lists SnapshotJob capture Pod containers that should receive
 podTemplate customizes the SnapshotJob capture Pod. The operator starts from the selected workload container and merges this template so users can add helper containers such as gms-saver.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125;  Type: object  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="activeDeadlineSeconds" type="integer">
+activeDeadlineSeconds limits how long the automatic SnapshotJob may run, including scheduling, weight loading, quiesce, and dump. Omission keeps the operator default of 3600 seconds. SnapshotJob.spec is immutable, so a change applies only when the operator creates a new SnapshotJob.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

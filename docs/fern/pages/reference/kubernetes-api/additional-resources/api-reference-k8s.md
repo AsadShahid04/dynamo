@@ -1473,6 +1473,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `gmsClientContainers` _string array_ | GMSClientContainers lists SnapshotJob capture Pod containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the service. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
+| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds limits how long the automatic SnapshotJob may run,<br />including scheduling, weight loading, quiesce, and dump. Omission keeps<br />the operator default of 3600 seconds. SnapshotJob.spec is immutable, so a<br />change applies only when the operator creates a new SnapshotJob. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### ServiceCheckpointStatus
@@ -1769,6 +1770,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `gmsClientContainers` _string array_ | gmsClientContainers lists SnapshotJob capture Pod containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the component. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate customizes the SnapshotJob capture Pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
+| `activeDeadlineSeconds` _integer_ | activeDeadlineSeconds limits how long the automatic SnapshotJob may run,<br />including scheduling, weight loading, quiesce, and dump. Omission keeps<br />the operator default of 3600 seconds. SnapshotJob.spec is immutable, so a<br />change applies only when the operator creates a new SnapshotJob. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### ComponentCheckpointStatus

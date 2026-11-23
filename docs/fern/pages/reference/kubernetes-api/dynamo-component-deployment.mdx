@@ -489,6 +489,11 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
 
       <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
     </ParamField>
+    <ParamField path="activeDeadlineSeconds" type="integer">
+      Limits how long the automatic `SnapshotJob` may run, including scheduling, weight loading, quiesce, and dump. When omitted, the operator sets the deadline to 3600 seconds. Minimum `1`.
+
+      `SnapshotJob.spec` is immutable. Changing this value does not update a SnapshotJob that already exists. The operator applies it when it creates a new SnapshotJob, on the first capture and when the worker or compatibility hash changes.
+    </ParamField>
   </Indent>
   <ParamField path="mode" type="CheckpointMode" deprecated={true}>
     Deprecated: omit `mode`. Use `enabled: true` without `checkpointRef` for a DGD-managed automatic checkpoint, or use `checkpointRef` to restore a named PodSnapshot.
