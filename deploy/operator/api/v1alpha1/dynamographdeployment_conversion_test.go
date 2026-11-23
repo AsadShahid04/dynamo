@@ -679,7 +679,8 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 							DeletionPolicy:      v1beta1.CheckpointDeletionPolicyRetain,
 							TargetContainerName: "worker",
 							Job: &v1beta1.ComponentCheckpointJobConfig{
-								GMSClientContainers: []string{"gms-saver"},
+								GMSClientContainers:   []string{"gms-saver"},
+								ActiveDeadlineSeconds: new(int64(7200)),
 								PodTemplate: &corev1.PodTemplateSpec{
 									Spec: corev1.PodSpec{
 										Containers: []corev1.Container{{
@@ -722,7 +723,8 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 							BackendFramework: "vllm",
 						},
 						Job: &ServiceCheckpointJobConfig{
-							GMSClientContainers: []string{"gms-saver"},
+							GMSClientContainers:   []string{"gms-saver"},
+							ActiveDeadlineSeconds: new(int64(7200)),
 						},
 					},
 				},
@@ -743,6 +745,10 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"gms-saver"}, hub.Spec.Components[0].Experimental.Checkpoint.Job.GMSClientContainers); diff != "" {
 		t.Fatalf("hub checkpoint job GMS clients mismatch (-want +got):\n%s", diff)
+	}
+	if hub.Spec.Components[0].Experimental.Checkpoint.Job.ActiveDeadlineSeconds == nil ||
+		*hub.Spec.Components[0].Experimental.Checkpoint.Job.ActiveDeadlineSeconds != 7200 {
+		t.Fatalf("hub checkpoint deadline = %v, want 7200", hub.Spec.Components[0].Experimental.Checkpoint.Job.ActiveDeadlineSeconds)
 	}
 
 	got := roundTripFromV1alpha1(t, src)

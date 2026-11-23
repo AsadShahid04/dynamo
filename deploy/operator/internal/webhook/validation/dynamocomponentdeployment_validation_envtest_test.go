@@ -823,6 +823,32 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantCELErr: "spec.experimental.checkpoint: Invalid value: checkpoint.job cannot be set when checkpointRef is specified",
 		},
+		{
+			name: "v1beta1 checkpoint activeDeadlineSeconds rejects zero",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Job: &nvidiacomv1beta1.ComponentCheckpointJobConfig{
+							ActiveDeadlineSeconds: new(int64(0)),
+						},
+					},
+				}
+			}),
+			wantSchemaErr: "spec.experimental.checkpoint.job.activeDeadlineSeconds: Invalid value: 0: spec.experimental.checkpoint.job.activeDeadlineSeconds in body should be greater than or equal to 1",
+		},
+		{
+			name: "v1alpha1 checkpoint activeDeadlineSeconds rejects zero",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						ActiveDeadlineSeconds: new(int64(0)),
+					},
+				}
+			}),
+			wantSchemaErr: "spec.checkpoint.job.activeDeadlineSeconds: Invalid value: 0: spec.checkpoint.job.activeDeadlineSeconds in body should be greater than or equal to 1",
+		},
 
 		// Shared v1alpha1 validation reached through standalone DCD admission.
 		{

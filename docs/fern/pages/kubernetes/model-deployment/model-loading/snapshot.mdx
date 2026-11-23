@@ -130,7 +130,10 @@ kubectl get pvc model-cache -n "$NAMESPACE"
 ```
 
 For GLM, download the pinned model before starting capture. This keeps model
-download time outside Dynamo's one-hour capture deadline:
+download time outside the automatic SnapshotJob deadline, which defaults to
+one hour. Set `experimental.checkpoint.job.activeDeadlineSeconds` on the worker
+when capture itself needs longer. A change applies only to a newly created
+SnapshotJob:
 
 ```bash
 if [ "$RECIPE" = glm-5.3 ]; then

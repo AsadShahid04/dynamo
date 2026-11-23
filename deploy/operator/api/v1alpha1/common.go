@@ -507,6 +507,14 @@ type ServiceCheckpointJobConfig struct {
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+
+	// ActiveDeadlineSeconds limits how long the automatic SnapshotJob may run,
+	// including scheduling, weight loading, quiesce, and dump. Omission keeps
+	// the operator default of 3600 seconds. SnapshotJob.spec is immutable, so a
+	// change applies only when the operator creates a new SnapshotJob.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 }
 
 // Deprecated: omit in DGD service checkpoint configs. Automatic capture

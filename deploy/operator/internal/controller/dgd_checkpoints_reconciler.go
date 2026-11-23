@@ -358,7 +358,12 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 	}
 
 	// SnapshotJob owns the one-shot capture state machine while Dynamo supplies
-	// the rendered workload and compatibility metadata.
+	// the rendered workload and compatibility metadata. The deadline is fixed
+	// on the immutable SnapshotJob spec when that job is created.
+	var configuredDeadline *int64
+	if checkpointConfig.Job != nil {
+		configuredDeadline = checkpointConfig.Job.ActiveDeadlineSeconds
+	}
 	desired := buildAutomaticSnapshotJob(
 		dynamoDeployment,
 		componentName,
@@ -369,6 +374,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		targetContainerName,
 		deletionPolicy,
 		gmsMode,
+		configuredDeadline,
 	)
 	snapshotJob, err := r.syncAutomaticSnapshotJob(
 		ctx,
@@ -399,6 +405,9 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 
 const automaticSnapshotActiveDeadlineSeconds = int64(3600)
 
+// buildAutomaticSnapshotJob renders the desired automatic SnapshotJob.
+// configuredDeadline may be nil, which selects the one-hour default. dgd must
+// be non-nil.
 func buildAutomaticSnapshotJob(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
@@ -409,6 +418,7 @@ func buildAutomaticSnapshotJob(
 	targetContainerName string,
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
 	gmsMode string,
+	configuredDeadline *int64,
 ) *snapshotv1alpha1.SnapshotJob {
 	name := fmt.Sprintf("checkpoint-%s", checkpointID)
 	labels := map[string]string{
@@ -437,6 +447,12 @@ func buildAutomaticSnapshotJob(
 		consts.SnapshotGMSModeAnnotation:              gmsMode,
 	}
 
+	// An omitted deadline keeps the historical one-hour SnapshotJob limit.
+	activeDeadlineSeconds := new(automaticSnapshotActiveDeadlineSeconds)
+	if configuredDeadline != nil {
+		activeDeadlineSeconds = new(*configuredDeadline)
+	}
+
 	return &snapshotv1alpha1.SnapshotJob{
 		APIVersion:  snapshotv1alpha1.GroupVersion.String(),
 		Kind:        "SnapshotJob",
@@ -446,7 +462,7 @@ func buildAutomaticSnapshotJob(
 		Annotations: annotations,
 		Spec: snapshotv1alpha1.SnapshotJobSpec{
 			PodTemplate:           podTemplate,
-			ActiveDeadlineSeconds: new(automaticSnapshotActiveDeadlineSeconds),
+			ActiveDeadlineSeconds: activeDeadlineSeconds,
 			PodSnapshotTemplate: snapshotv1alpha1.PodSnapshotTemplate{
 				Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{
 					Labels:      snapshotLabels,
@@ -499,7 +515,8 @@ func (r *dgdCheckpointsReconciler) syncAutomaticSnapshotJob(
 		return nil, fmt.Errorf("SnapshotJob %s is controlled by unexpected uid %q", key, controller.UID)
 	}
 	// Reconcile Dynamo-owned metadata and the existing deletion policy without
-	// modifying SnapshotJob.spec.
+	// modifying SnapshotJob.spec. activeDeadlineSeconds applies only when this
+	// function creates the SnapshotJob.
 	updated := existing.DeepCopy()
 	if updated.Labels == nil {
 		updated.Labels = map[string]string{}
