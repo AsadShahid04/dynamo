@@ -861,6 +861,8 @@ pub struct InflightGuard {
     request_type: RequestType,
     status: Status,
     error_type: ErrorType,
+    /// Static protocol field for a typed validation failure. Never a request value.
+    invalid_param: Option<&'static str>,
     timer: Instant,
     request_id: String,
     span: tracing::Span,
@@ -2321,6 +2323,7 @@ impl InflightGuard {
             request_type,
             status: Status::Error,
             error_type: ErrorType::Internal,
+            invalid_param: None,
             timer,
             request_id,
             span: tracing::Span::current(),
@@ -2362,11 +2365,19 @@ impl InflightGuard {
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
         self.error_type = ErrorType::None;
+        self.invalid_param = None;
     }
 
     pub(crate) fn mark_error(&mut self, error_type: ErrorType) {
         self.status = Status::Error;
         self.error_type = error_type;
+    }
+
+    /// Name the static field for the request-completion event.
+    ///
+    /// This is log context only. It is not a Prometheus label.
+    pub(crate) fn note_invalid_param(&mut self, invalid_param: &'static str) {
+        self.invalid_param = Some(invalid_param);
     }
 
     fn request_completion(&self) -> RequestCompletion {
@@ -2414,6 +2425,13 @@ impl Drop for InflightGuard {
                     // without a panic in a `Drop` impl.
                     ErrorType::None | ErrorType::Cancelled => "unknown error",
                 };
+                // `Option`'s `Value` impl records nothing when the field is
+                // absent, so other errors keep the existing event shape.
+                let invalid_param = if self.error_type == ErrorType::Validation {
+                    self.invalid_param
+                } else {
+                    None
+                };
                 tracing::error!(
                     request_id = %self.request_id,
                     model = %self.model,
@@ -2422,6 +2440,7 @@ impl Drop for InflightGuard {
                     status = %status_str,
                     error_type = %self.error_type,
                     error_detail = %detail,
+                    invalid_param,
                     elapsed_ms = %elapsed_ms,
                     "request completed"
                 );
@@ -5227,6 +5246,146 @@ mod tests {
             ])
             .get();
         assert_eq!(counter_value, 1);
+    }
+
+    struct CompletionFieldVisitor<'a>(&'a mut Vec<(String, String)>);
+
+    impl tracing::field::Visit for CompletionFieldVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    type CompletionEvents = Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
+
+    struct CompletionCapture {
+        events: CompletionEvents,
+    }
+
+    impl<S> tracing_subscriber::layer::Layer<S> for CompletionCapture
+    where
+        S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = Vec::new();
+            event.record(&mut CompletionFieldVisitor(&mut fields));
+            self.events.lock().expect("event lock").push(fields);
+        }
+    }
+
+    fn completion_event_field<'a>(event: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        event
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.trim_matches('"'))
+    }
+
+    /// Keeps the shared request-completion callsite enabled when other tests
+    /// drop an [`InflightGuard`] before this test installs its subscriber.
+    fn enable_request_completion_callsite() {
+        use std::sync::Once;
+        use tracing_subscriber::prelude::*;
+
+        struct EnableAll;
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EnableAll {}
+
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(EnableAll),
+            );
+        });
+    }
+
+    #[test]
+    fn test_request_completion_logs_static_invalid_param() {
+        use tracing_subscriber::prelude::*;
+
+        enable_request_completion_callsite();
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "test-model";
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (layer, handle) = tracing_subscriber::reload::Layer::new(CompletionCapture {
+            events: events.clone(),
+        });
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            // Re-evaluate callsites now that this subscriber is installed.
+            handle.modify(|_| {}).expect("rebuild tracing interest");
+            let mut attributed = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                false,
+                "attributed",
+            );
+            attributed.note_invalid_param("temperature");
+            attributed.mark_error(ErrorType::Validation);
+            drop(attributed);
+
+            let mut generic = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                false,
+                "generic",
+            );
+            generic.mark_error(ErrorType::Validation);
+            drop(generic);
+        });
+
+        let events = events.lock().expect("event lock");
+        let completions: Vec<_> = events
+            .iter()
+            .filter(|event| completion_event_field(event, "message") == Some("request completed"))
+            .collect();
+        assert_eq!(completions.len(), 2, "events: {events:?}");
+
+        assert_eq!(
+            completion_event_field(completions[0], "invalid_param"),
+            Some("temperature")
+        );
+        assert_eq!(
+            completion_event_field(completions[0], "error_detail"),
+            Some("invalid request parameters")
+        );
+        assert!(
+            completions[0]
+                .iter()
+                .all(|(_, value)| !value.contains("9.5")),
+            "completion event must not carry a rejected value: {:?}",
+            completions[0]
+        );
+        assert_eq!(
+            completion_event_field(completions[1], "invalid_param"),
+            None
+        );
+        assert_eq!(
+            completion_event_field(completions[1], "error_detail"),
+            Some("invalid request parameters")
+        );
+
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 2);
     }
 
     #[test]

@@ -999,6 +999,20 @@ pub fn validate_chat_only_generation_flags(
     Ok(())
 }
 
+/// Static request field from a typed [`validation::ValidationError`] in `error`.
+///
+/// Protocol checks carry the field as a `&'static str` and the rejected value
+/// separately. Only the field is returned, so a completion log can name the
+/// parameter without recording payload content. Plain-text failures, including
+/// ones that quote request data, return `None`.
+pub(crate) fn invalid_param(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(|source| {
+        source
+            .downcast_ref::<validation::ValidationError>()
+            .map(|validation| validation.field)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
