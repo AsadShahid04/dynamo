@@ -1123,6 +1123,10 @@ navigation:
             path: pages/recipes/feature-benchmarks/benchmarking-guide.md
             slug: benchmarking
             hidden: true
+          - page: LLM Deployment Benchmarking
+            path: pages/recipes/feature-benchmarks/llm-deployment-benchmarking.md
+            slug: llm-deployment-benchmarking
+            hidden: true
           - page: Embedding Cache
             path: pages/recipes/feature-benchmarks/embedding-cache.md
             slug: embedding-cache

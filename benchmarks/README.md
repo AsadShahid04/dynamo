@@ -57,7 +57,10 @@ aiperf plot artifacts/my-benchmark
 - **`multimodal/`** — Media and multimodal benchmarks, including frontend media decoding
 - **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)
 - **`prefix_data_generator/`** — Tools for analyzing and synthesizing prefix-structured data
+- **`llm/`** — Pointer to the LLM deployment benchmarking guide. `perf.sh` and `plot_pareto.py` were removed after v1.2.1.
 
 ## Comprehensive Guide
 
 For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/fern/pages/recipes/feature-benchmarks/benchmarking-guide.md).
+
+For an aggregated-versus-disaggregated LLM comparison with the current launch scripts, see the [LLM deployment benchmarking guide](../docs/fern/pages/recipes/feature-benchmarks/llm-deployment-benchmarking.md).
